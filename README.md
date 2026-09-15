@@ -40,6 +40,7 @@ twist2_mjlab/
 │   ├── pretrained.onnx         # Pretrained ONNX model (for sim2sim)
 │   ├── pretrained_seed.pt      # Pretrained SEED checkpoint (30K iterations)
 │   ├── pretrained_seed.onnx    # Pretrained SEED ONNX model (for sim2sim)
+│   ├── pretrained_aux.onnx     # ONNX for the 30K differentiable-aux (world model) policy
 │   ├── hello.gif               # README demo asset
 │   ├── example.gif             # README demo asset
 │   └── readme_zh.md            # Chinese usage guide

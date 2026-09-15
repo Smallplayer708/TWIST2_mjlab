@@ -40,6 +40,7 @@ twist2_mjlab/
 │   ├── pretrained.onnx         # 预训练 ONNX 模型（用于 sim2sim）
 │   ├── pretrained_seed.pt      # SEED 预训练检查点（30K iterations）
 │   ├── pretrained_seed.onnx    # SEED 预训练 ONNX 模型（用于 sim2sim）
+│   ├── pretrained_aux.onnx     # 可微 aux（world model）策略 30K 的 ONNX（用于 sim2sim / 遥操作）
 │   ├── hello.gif               # README 演示资源
 │   ├── example.gif             # README 演示资源
 │   └── readme_zh.md            # 中文使用说明
@@ -293,6 +294,13 @@ TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl \
   ./deploy/play_sim_twist2.sh
 ```
 
+**使用内置的可微 aux 策略（world model，30K）：**
+
+```bash
+TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl \
+  ./deploy/play_sim_twist2.sh resources/pretrained_aux.onnx
+```
+
 和训练、播放一样，TWIST2 与 SEED 的 sim2sim 启动器也是彼此独立的：你可以按需使用任意一个，或者都用来对比结果。
 
 **工作原理：**
@@ -359,6 +367,8 @@ cd /path/to/twist2_mjlab
 bash deploy/play_sim_twist2_redis.sh \
   logs/rsl_rl/g1_twist2_flat/<RUN>/<RUN>.onnx
 ```
+
+> 仓库已内置可微 aux（world model）策略 30K 的 ONNX：`resources/pretrained_aux.onnx`。若只想试这个策略，可跳过第 1 步，第 3 步直接运行 `bash deploy/play_sim_twist2_redis.sh resources/pretrained_aux.onnx`。
 
 - 绿色半透明“影子”是遥操作参考姿态，实体机器人是策略输出；`Ctrl-C` 会同时结束 policy 与 sim 两个节点。
 - policy 节点启动时先用默认站立姿态，读到 Redis 新值后立即切换到遥操作流。
