@@ -327,6 +327,52 @@ sim_node (MuJoCo, 1000 Hz)        policy_node (ONNX, 50 Hz)
 | `TWIST2_MOTION_INDEX` | 多动作数据集中要播放的动作索引（默认 `0`） |
 | `TWIST2_INIT_YAW_DEG` | 机器人初始偏航角，单位度（默认 `0`） |
 
+#### 实时遥操作仿真（Redis 链路）
+
+除了上面基于 pkl 动作库的 sim2sim，本仓库还提供一条**实时遥操作**链路：**遥操作发布端**把 35D mimic 写进 Redis，**policy 节点**（`deploy/policy/twist2_policy_redis.py`）读取该键、运行 ONNX、并通过 UDP 发送动作，**sim 节点**照旧渲染。整个流程由 `deploy/play_sim_twist2_redis.sh` 启动。
+
+Redis key 与格式：`action_body_unitree_g1_with_hands`，值是 35 个浮点数的 JSON 列表：
+`[root_vel_x, root_vel_y, root_z, roll, pitch, yaw_ang_vel, 29 × 关节位置]`。
+
+**前置条件：**
+
+- Redis 服务：`redis-server --daemonize yes`（用 `redis-cli ping` 验证返回 `PONG`）。
+- 遥操作发布端：原 TWIST2 仓库的 `teleop.sh`（需要 PICO/VR，使用 `gmr` conda 环境），它运行 `deploy_real/xrobot_teleop_to_robot_w_hand.py` 并写入上面的 key。
+
+**步骤：**
+
+```bash
+# 1) 把某个 checkpoint 导出为 ONNX（例如用可微 aux 目标训练到 30K 的策略）
+cd /path/to/twist2_mjlab
+TWIST2_MOTION_FILE=/path/to/enriched/sub1_clothesstand_000.pkl \
+  uv run python deploy/export_onnx.py logs/rsl_rl/g1_twist2_flat/<RUN>/model_29999.pt
+# 结果：logs/rsl_rl/g1_twist2_flat/<RUN>/<RUN>.onnx
+
+# 2) 启动遥操作发布端（另开终端，需要 PICO/VR）
+cd /path/to/TWIST2
+bash teleop.sh                     # 可选：--mode tuned / --mode fix_feet
+# 验证是否在实时更新（值应持续变化）：
+# while true; do redis-cli get action_body_unitree_g1_with_hands | md5sum; sleep 1; done
+
+# 3) 启动 mjlab 侧（policy + sim 查看器）
+cd /path/to/twist2_mjlab
+bash deploy/play_sim_twist2_redis.sh \
+  logs/rsl_rl/g1_twist2_flat/<RUN>/<RUN>.onnx
+```
+
+- 绿色半透明“影子”是遥操作参考姿态，实体机器人是策略输出；`Ctrl-C` 会同时结束 policy 与 sim 两个节点。
+- policy 节点启动时先用默认站立姿态，读到 Redis 新值后立即切换到遥操作流。
+- 如果 Redis 里的值**一直不变**（即没有 teleop 发布端在跑），机器人只会保持最后收到的姿势。这可以单独用来验证策略的站立稳定性，但不构成“遥操作”。
+
+**没有 VR 时的替代方案：**
+
+- 直接用 pkl 动作库的 sim2sim（不需要 Redis / VR）：
+  ```bash
+  TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl \
+    bash deploy/play_sim_twist2.sh /path/to/model_29999.pt
+  ```
+- 或者写一个「PKL → Redis」的 50 Hz 回放发布器，复用 `deploy/policy/twist2_policy.py` 里的 `build_mimic_from_frame`，把录制的动作当作遥操作流写进同一个 key。这样就可以在没有 VR 的情况下跑完整的 Redis 链路；把上面的第 2 步替换成该回放器即可。
+
 ### 6) 硬件部署
 
 真机部署与 sim2sim 共用同一个 policy 节点和 UDP 协议，只是把 MuJoCo 仿真换成了一个 50 Hz 的硬件循环：通过内置的 Unitree SDK2 包装层读取 G1 的 IMU 与关节状态，再把 policy 输出的关节目标以 PD 控制下发到电机，PD 增益与 MJLab G1 定义保持一致。
@@ -386,6 +432,60 @@ TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl \
 - 始终保持手握手柄，**SELECT** 是最快的应急出口。
 - 启动前请把机器人悬吊起来，或者由另一人扶住。按下 **A** 的瞬间控制权就交给 policy 了。
 - Ctrl-C 时启动脚本的清理钩子会 `pkill` 掉两个节点，硬件节点退出前会先在当前姿态阻尼保持。
+
+## 可微辅助目标（Differentiable Auxiliary Objective）
+
+本仓库在原有 PPO 训练之上新增了一个**可微的闭环辅助目标**。它**不改变策略网络结构，也不改变推理/部署链路**，只在训练时额外提供一条「动作 → 未来状态 → 未来跟踪误差」的梯度路径。
+
+### 原理
+
+- 原始 PPO 只优化单步代理目标，梯度不经过机器人动力学，credit assignment 只有一步；同时参考运动由时钟驱动（`PklMotionCommand._update_command` 中的 `motion_times += step_dt`），策略只能“盲目”跟随参考。
+- 新增的辅助损失 `L_aux` 把策略当前的**均值动作**通过一个可微模型向前滚 `H` 步，惩罚预测状态与未来参考的偏差，再反传回 actor：
+
+  ```
+  ∂L_aux/∂θ = Σ_h (∂L_aux/∂ŝ_{t+h}) · (∂ŝ_{t+h}/∂a_t) · (∂a_t/∂θ)
+  ```
+
+- 可微模型有两种实现，由 `aux_mode` 选择：
+  - `world_model`（默认）：学习式特权动力学模型 `f_θ(s, a, ref) → Δs`（MLP，末层零初始化）。用 rollout buffer 中 on-policy 的相邻转移做监督 MSE 在线训练。它**不接触接触力，也不经过物理求解器**，因此辅助梯度天然平滑，规避了接触带来的梯度爆炸问题。
+  - `analytic`：无学习参数的一阶执行器代理（位置执行器映射 + 一阶滞后），用于最低成本地验证“可微闭环梯度是否有用”。
+- 梯度只经**动作**回传：起点状态与参考窗口都 `detach`，世界模型参数在对 actor 反传时冻结；`aux_coef` 从 0 线性 warmup，避免早期压过 PPO。
+- 关键约束：**不往 actor 增加任何真机不可观测的观测量**。aux 观测（特权状态、未来参考窗口）只写入 rollout buffer，不参与 actor/critic 的输入，因此 ONNX 导出维度、旧 checkpoint 结构都保持不变。
+- 闭环语义：rollout 的起点是 on-policy 的真实状态，策略当前动作会改变未来状态、进而改变未来跟踪误差，梯度因此反映了动作的时域后果。
+
+### 实现与文件
+
+| 文件 | 作用 |
+|------|------|
+| `src/twist2_mjlab/rl/world_model.py` | `PrivilegedDynamicsModel`：一步状态差分预测，末层零初始化 |
+| `src/twist2_mjlab/rl/algorithm.py` | `Twist2PPO`：保留 PPO 主体，注入 `aux_coef * L_aux`；含世界模型监督训练、warmup、`save()/load()` 扩展 |
+| `src/twist2_mjlab/observations.py` | `aux_privileged_state`（97D 特权状态）与 `aux_reference_future`（`[H+1, 91]` 参考窗口） |
+| `src/twist2_mjlab/config.py` | `enable_aux` 时新增两个**不参与 actor/critic** 的观测组 `aux_state` / `aux_ref_future` |
+| `src/twist2_mjlab/rl_cfg.py` | `Twist2PpoCfg`（`class_name` 指向 `Twist2PPO`）与全部 `aux_*` 超参 |
+
+默认 `aux_coef=0.0` 且 aux 观测组默认关闭，此时训练与原始 PPO **逐位一致**，也不会产生额外的每步开销与显存占用。
+
+### 使用
+
+```bash
+# world_model 路线：学习式世界模型 + H 步闭环 rollout
+TWIST2_ENABLE_AUX=1 TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train_twist2.sh 0 \
+  --agent.algorithm.aux-mode world_model \
+  --agent.algorithm.aux-coef 0.1 \
+  --agent.algorithm.aux-coef-warmup-iters 1000 \
+  --agent.algorithm.aux-model-lr 3e-4
+
+# analytic 路线：一阶解析代理，最低成本验证
+TWIST2_ENABLE_AUX=1 TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train_twist2.sh 0 \
+  --agent.algorithm.aux-mode analytic \
+  --agent.algorithm.aux-coef 0.05
+```
+
+- `TWIST2_ENABLE_AUX=1` 让环境产出 aux 观测组；`--agent.algorithm.aux-coef > 0` 才真正启用辅助损失。若只给后者而不开观测组，算法会打印一次警告并自动禁用 aux。
+- 监控曲线：`Loss/aux`（辅助损失）、`Loss/world_model`（世界模型监督误差，应下降）、`Loss/aux_coef`（按 warmup 从 0 升到目标值）。
+- **要判断净收益，必须跑对照**：用同一配置、同一 seed 跑一条 `TWIST2_ENABLE_AUX=0` 的基线，再和 aux 对比 `Metrics/motion/error_*`、`Train/mean_episode_length` 与 `Episode_Termination/*`。
+- aux 目标与奖励权重**完全解耦**：它直接从参考运动取关节 pos/vel、root pos/rpy、key-body，不读取也不修改任何奖励项。`aux_*_weight` 只是辅助损失内部的权重。
+- 部署时不需要世界模型：`L_aux`、`aux_state`、`aux_ref_future` 都只存在于训练侧，导出的 ONNX 仍然只是 actor。
 
 ## 动作文件格式
 
@@ -485,6 +585,8 @@ motions:
 - `src/twist2_mjlab/commands.py` — 动作加载与重采样
 - `src/twist2_mjlab/pkl_motion_lib.py` — 动作加载、插值与采样
 - `src/twist2_mjlab/rl_cfg.py` — 运行器与模型配置
+- `src/twist2_mjlab/rl/algorithm.py` — `Twist2PPO`：PPO + 可微闭环辅助目标（`L_aux`）
+- `src/twist2_mjlab/rl/world_model.py` — 可微特权动力学模型 `PrivilegedDynamicsModel`
 
 ## 排查问题
 

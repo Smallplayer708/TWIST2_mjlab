@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from dataclasses import replace
 
 from mjlab.actuator import BuiltinPositionActuatorCfg
@@ -59,42 +60,42 @@ def _twist2_tracking_reward_cfg() -> dict[str, RewardTermCfg]:
   return {
     "tracking_joint_dof": RewardTermCfg(
       func=twist2_rewards.tracking_joint_dof,
-      weight=2.0,
+      weight=6.0,
       params={"command_name": "motion"},
     ),
     "tracking_joint_vel": RewardTermCfg(
       func=twist2_rewards.tracking_joint_vel,
-      weight=0.2,
+      weight=0.6,
       params={"command_name": "motion"},
     ),
     "tracking_root_translation_z": RewardTermCfg(
       func=twist2_rewards.tracking_root_translation_z,
-      weight=1.0,
+      weight=2.0,
       params={"command_name": "motion"},
     ),
     "tracking_root_rotation": RewardTermCfg(
       func=twist2_rewards.tracking_root_rotation,
-      weight=1.0,
+      weight=2.0,
       params={"command_name": "motion"},
     ),
     "tracking_root_linear_vel": RewardTermCfg(
       func=twist2_rewards.tracking_root_linear_vel,
-      weight=1.0,
+      weight=2.0,
       params={"command_name": "motion"},
     ),
     "tracking_root_angular_vel": RewardTermCfg(
       func=twist2_rewards.tracking_root_angular_vel,
-      weight=1.0,
+      weight=2.0,
       params={"command_name": "motion"},
     ),
     "tracking_keybody_pos": RewardTermCfg(
       func=twist2_rewards.tracking_keybody_pos,
-      weight=2.0,
+      weight=6.0,
       params={"command_name": "motion"},
     ),
     "tracking_keybody_pos_global": RewardTermCfg(
       func=twist2_rewards.tracking_keybody_pos_global,
-      weight=2.0,
+      weight=6.0,
       params={"command_name": "motion"},
     ),
   }
@@ -178,17 +179,17 @@ def _twist2_regularization_reward_cfg() -> dict[str, RewardTermCfg]:
     # ------------------------------------------------------------------
     "com_in_support_polygon": RewardTermCfg(
       func=twist2_rewards.simplified_com_in_support_polygon,
-      weight=0.2,
+      weight=0.1,
       params={"feet_sensor_cfg": SceneEntityCfg("feet_ground_contact")},
     ),
     "capture_point_in_support_polygon": RewardTermCfg(
       func=twist2_rewards.simplified_capture_point_in_support_polygon,
-      weight=0.3,
+      weight=0.1,
       params={"feet_sensor_cfg": SceneEntityCfg("feet_ground_contact")},
     ),
     "ankle_hip_step": RewardTermCfg(
       func=twist2_rewards.AnkleHipStepReward,
-      weight=0.2,
+      weight=0.05,
       params={"feet_sensor_cfg": SceneEntityCfg("feet_ground_contact")},
     ),
     "linear_momentum_change": RewardTermCfg(
@@ -437,7 +438,7 @@ def unitree_g1_pkl_tracking_env_cfg(
     adaptive_uniform_ratio=old_cmd.adaptive_uniform_ratio,
     adaptive_alpha=old_cmd.adaptive_alpha,
     sampling_mode=old_cmd.sampling_mode,
-    offload_to_cpu=True,
+    offload_to_cpu=False,
   )
 
   if play:
@@ -447,8 +448,28 @@ def unitree_g1_pkl_tracking_env_cfg(
   return cfg
 
 
+def _aux_observations_enabled(enable_aux: bool | None) -> bool:
+  """Resolve whether the auxiliary observation groups are built.
+
+  Off by default so baseline training keeps its original per-step cost and
+  rollout-buffer memory. Opt in with ``enable_aux=True`` or the
+  ``TWIST2_ENABLE_AUX=1`` environment variable (mirroring the ``TWIST2_*``
+  launcher convention). The groups are only needed when
+  ``--agent.algorithm.aux-coef`` is greater than zero.
+  """
+  if enable_aux is not None:
+    return enable_aux
+  return os.environ.get("TWIST2_ENABLE_AUX", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+  )
+
+
 def unitree_g1_pkl_tracking_custom_ppo_env_cfg(
   play: bool = False,
+  enable_aux: bool | None = None,
 ) -> ManagerBasedRlEnvCfg:
   cfg = unitree_g1_pkl_tracking_env_cfg(play=play)
 
@@ -493,14 +514,43 @@ def unitree_g1_pkl_tracking_custom_ppo_env_cfg(
     ),
   }
 
+  if _aux_observations_enabled(enable_aux):
+    # Stored in the rollout buffer but never consumed by actor/critic, so these
+    # groups do not change policy input dimensions. They feed the differentiable
+    # closed-loop auxiliary objective in `Twist2PPO`.
+    cfg.observations["aux_state"] = ObservationGroupCfg(
+      terms={
+        "state": ObservationTermCfg(
+          func=twist2_obs.aux_privileged_state,
+          params={"command_name": "motion"},
+        )
+      },
+      concatenate_terms=True,
+      enable_corruption=False,
+    )
+    cfg.observations["aux_ref_future"] = ObservationGroupCfg(
+      terms={
+        "future": ObservationTermCfg(
+          func=twist2_obs.aux_reference_future,
+          params={
+            "command_name": "motion",
+            "step_offsets": twist2_obs.AUX_REF_STEP_OFFSETS,
+          },
+        )
+      },
+      concatenate_terms=True,
+      enable_corruption=False,
+    )
+
   _set_default_num_envs(cfg, play=play)
   return cfg
 
 
 def unitree_g1_twist2_flat_env_cfg(
   play: bool = False,
+  enable_aux: bool | None = None,
 ) -> ManagerBasedRlEnvCfg:
-  cfg = unitree_g1_pkl_tracking_custom_ppo_env_cfg(play=play)
+  cfg = unitree_g1_pkl_tracking_custom_ppo_env_cfg(play=play, enable_aux=enable_aux)
 
   cfg.sim.njmax = 400
 

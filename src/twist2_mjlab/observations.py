@@ -66,6 +66,37 @@ ACTOR_PROPRIO_DIM = 92
 ACTOR_HISTORY_FEATURE_DIM = ACTOR_MIMIC_DIM + ACTOR_PROPRIO_DIM
 CRITIC_PRIV_STEP_DIM = 21 + NUM_G1_JOINTS + 3 * len(KEY_BODY_NAMES)
 
+# ---------------------------------------------------------------------------
+# Auxiliary (differentiable closed-loop) observations.
+#
+# These groups are stored in the rollout buffer but NEVER consumed by the actor
+# or critic networks, so they do not change the policy input dimensions.
+# `aux_state` is the privileged current robot state used as the (detached) start
+# of the differentiable rollout; `aux_ref_future` holds the reference targets for
+# t..t+H. Both contain only quantities that exist in simulation (the auxiliary
+# loss is a training-time signal; no new on-robot observation is required).
+# ---------------------------------------------------------------------------
+AUX_HORIZON = 2
+AUX_REF_STEP_OFFSETS: tuple[int, ...] = tuple(range(AUX_HORIZON + 1))
+AUX_STATE_KEY = "aux_state"
+AUX_REF_KEY = "aux_ref_future"
+
+# aux_state layout: joint_pos | joint_vel | root_pos | root_rpy | root_lin_vel | root_ang_vel | key_body_pos_b
+AUX_PRIV_STATE_DIM = 2 * NUM_G1_JOINTS + 3 + 3 + 3 + 3 + 3 * len(KEY_BODY_NAMES)
+AUX_JOINT_POS = slice(0, NUM_G1_JOINTS)
+AUX_JOINT_VEL = slice(NUM_G1_JOINTS, 2 * NUM_G1_JOINTS)
+AUX_ROOT_POS = slice(2 * NUM_G1_JOINTS, 2 * NUM_G1_JOINTS + 3)
+AUX_ROOT_RPY = slice(2 * NUM_G1_JOINTS + 3, 2 * NUM_G1_JOINTS + 6)
+AUX_KEY_BODY = slice(2 * NUM_G1_JOINTS + 12, AUX_PRIV_STATE_DIM)
+
+# aux_ref_future layout: joint_pos | joint_vel | root_pos | root_rpy | key_body_pos_b
+AUX_REF_STEP_DIM = 2 * NUM_G1_JOINTS + 3 + 3 + 3 * len(KEY_BODY_NAMES)
+AUX_REF_JOINT_POS = slice(0, NUM_G1_JOINTS)
+AUX_REF_JOINT_VEL = slice(NUM_G1_JOINTS, 2 * NUM_G1_JOINTS)
+AUX_REF_ROOT_POS = slice(2 * NUM_G1_JOINTS, 2 * NUM_G1_JOINTS + 3)
+AUX_REF_ROOT_RPY = slice(2 * NUM_G1_JOINTS + 3, 2 * NUM_G1_JOINTS + 6)
+AUX_REF_KEY_BODY = slice(2 * NUM_G1_JOINTS + 6, AUX_REF_STEP_DIM)
+
 
 def get_motion_command(env: ManagerBasedRlEnv, command_name: str) -> PklMotionCommand:
 	return cast(PklMotionCommand, env.command_manager.get_term(command_name))
@@ -333,3 +364,88 @@ def critic_extras_dim() -> int:
 
 def critic_priv_step_dim() -> int:
 	return CRITIC_PRIV_STEP_DIM
+
+
+def aux_privileged_state(
+	env: ManagerBasedRlEnv, command_name: str = "motion"
+) -> torch.Tensor:
+	"""Privileged current robot state used as a differentiable-rollout start point.
+
+	Returns ``[N, AUX_PRIV_STATE_DIM]``. This is a training-time signal only; it
+	does not add any new actor observation and may contain quantities (root pose
+	and velocity) that are not observable on real hardware.
+	"""
+	command = get_motion_command(env, command_name)
+
+	# Subtract env origins so the root position is expressed in the same
+	# env-local frame as `aux_reference_future` (which reads raw motion frames).
+	root_pos = command.robot_body_pos_w[:, 0] - env.scene.env_origins
+	root_quat = command.robot_body_quat_w[:, 0]
+	roll, pitch, yaw = euler_xyz_from_quat(root_quat)
+	root_rpy = torch.stack((roll, pitch, wrap_to_pi(yaw)), dim=-1)
+	root_lin_vel = command.robot_body_lin_vel_w[:, 0]
+	root_ang_vel = command.robot_body_ang_vel_w[:, 0]
+	key_body_pos_b = critic_key_body_pos_b(env, command_name)
+
+	return torch.cat(
+		(
+			command.robot_joint_pos,
+			command.robot_joint_vel,
+			root_pos,
+			root_rpy,
+			root_lin_vel,
+			root_ang_vel,
+			key_body_pos_b,
+		),
+		dim=-1,
+	)
+
+
+def aux_reference_future(
+	env: ManagerBasedRlEnv,
+	command_name: str = "motion",
+	step_offsets: tuple[int, ...] = AUX_REF_STEP_OFFSETS,
+) -> torch.Tensor:
+	"""Reference tracking targets for ``t + k * step_dt`` for ``k`` in ``step_offsets``.
+
+	Returns ``[N, len(step_offsets), AUX_REF_STEP_DIM]`` with layout
+	``joint_pos | joint_vel | root_pos | root_rpy | key_body_pos_b``. The window
+	mirrors ``privileged_future_sequence`` but only keeps the quantities used by
+	the auxiliary tracking loss.
+	"""
+	command = get_motion_command(env, command_name)
+	offsets = torch.tensor(step_offsets, device=command.device, dtype=torch.float32)
+	num_envs = env.num_envs
+	num_steps = len(step_offsets)
+
+	motion_ids = command.motion_ids[:, None].expand(-1, num_steps).reshape(-1)
+	motion_times = command.motion_times[:, None] + offsets[None, :] * env.step_dt
+	frame = command.motion_lib.get_frame(motion_ids, motion_times.reshape(-1))
+
+	body_pos_w = frame.body_pos_w.reshape(num_envs, num_steps, -1, 3)
+	body_quat_w = frame.body_quat_w.reshape(num_envs, num_steps, -1, 4)
+	joint_pos = frame.joint_pos.reshape(num_envs, num_steps, -1)
+	joint_vel = frame.joint_vel.reshape(num_envs, num_steps, -1)
+
+	root_pos_w = body_pos_w[:, :, 0]
+	root_quat_w = body_quat_w[:, :, 0]
+	flat_root_quat = root_quat_w.reshape(-1, 4)
+	roll, pitch, yaw = euler_xyz_from_quat(flat_root_quat)
+	root_rpy = torch.stack((roll, pitch, wrap_to_pi(yaw)), dim=-1).reshape(
+		num_envs, num_steps, 3
+	)
+
+	key_body_indices = tracked_body_indices(command)
+	key_body_pos_w = body_pos_w[:, :, key_body_indices]
+	key_body_delta_w = key_body_pos_w - root_pos_w[:, :, None, :]
+	key_body_quat = root_quat_w[:, :, None, :].expand(
+		-1, -1, len(KEY_BODY_NAMES), -1
+	)
+	key_body_pos_b = quat_apply_inverse(
+		key_body_quat.reshape(-1, 4), key_body_delta_w.reshape(-1, 3)
+	).reshape(num_envs, num_steps, len(KEY_BODY_NAMES) * 3)
+
+	return torch.cat(
+		(joint_pos, joint_vel, root_pos_w, root_rpy, key_body_pos_b),
+		dim=-1,
+	)

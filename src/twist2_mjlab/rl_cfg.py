@@ -7,13 +7,68 @@ but keeps the implementation local to this package.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as dataclass_fields
 
 from mjlab.rl import RslRlModelCfg
 from mjlab.rl import RslRlOnPolicyRunnerCfg
+from mjlab.rl import RslRlPpoAlgorithmCfg
 from mjlab.tasks.tracking.config.g1.rl_cfg import unitree_g1_tracking_ppo_runner_cfg
 
 from twist2_mjlab import observations as twist2_obs
+
+
+@dataclass
+class Twist2PpoCfg(RslRlPpoAlgorithmCfg):
+  """PPO config with the TWIST2 differentiable closed-loop auxiliary objective.
+
+  All ``aux_*`` fields are consumed by
+  :class:`twist2_mjlab.rl.algorithm:Twist2PPO`. With ``aux_coef=0`` the update is
+  numerically identical to the base PPO update.
+  """
+
+  class_name: str = "twist2_mjlab.rl.algorithm:Twist2PPO"
+
+  aux_mode: str = "world_model"
+  """Differentiable substrate: ``"world_model"``, ``"analytic"`` or ``"none"``."""
+
+  aux_coef: float = 0.0
+  """Weight of the auxiliary loss added to the PPO loss (0 disables it)."""
+
+  aux_start_iter: int = 0
+  """Update index at which the auxiliary loss starts contributing."""
+
+  aux_coef_warmup_iters: int = 0
+  """Linear warmup length (in updates) for ``aux_coef`` after ``aux_start_iter``."""
+
+  aux_horizon: int = twist2_obs.AUX_HORIZON
+  """Closed-loop rollout horizon H (must match the env aux observation window)."""
+
+  aux_model_hidden: tuple[int, ...] = (256, 256)
+  """Hidden dims of the learned privileged dynamics model."""
+
+  aux_model_activation: str = "elu"
+  """Activation of the learned privileged dynamics model."""
+
+  aux_model_lr: float = 3e-4
+  """Learning rate for the supervised world-model optimizer."""
+
+  aux_world_model_batch: int = 16384
+  """Max number of on-policy transitions sampled per world-model update."""
+
+  aux_joint_pos_weight: float = 1.0
+  aux_joint_vel_weight: float = 0.1
+  aux_root_pos_weight: float = 1.0
+  aux_root_rpy_weight: float = 1.0
+  aux_key_body_weight: float = 1.0
+
+  aux_first_order_alpha: float = 0.5
+  """First-order lag gain used by the ``"analytic"`` substrate."""
+
+  aux_action_scale: float = 0.0
+  """Action scale for the ``"analytic"`` substrate (0 = infer from the env)."""
+
+  aux_step_dt: float = 0.0
+  """Control step (s) for the ``"analytic"`` substrate (0 = infer from the env)."""
 
 
 @dataclass
@@ -56,6 +111,17 @@ def unitree_g1_twist2_flat_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       "critic_extras",
     ),
   }
+  base_alg = base.algorithm
+  cfg.algorithm = Twist2PpoCfg(
+    **{
+      field.name: getattr(base_alg, field.name)
+      for field in dataclass_fields(base_alg)
+      if field.name != "class_name"
+    },
+    aux_mode="world_model",
+    aux_coef=0.0,
+    aux_horizon=twist2_obs.AUX_HORIZON,
+  )
   cfg.actor = Twist2FutureModelCfg(
     hidden_dims=base.actor.hidden_dims,
     activation=base.actor.activation,
@@ -96,4 +162,8 @@ def unitree_g1_twist2_flat_runner_cfg() -> RslRlOnPolicyRunnerCfg:
   return cfg
 
 
-__all__ = ["Twist2FutureModelCfg", "unitree_g1_twist2_flat_runner_cfg"]
+__all__ = [
+  "Twist2FutureModelCfg",
+  "Twist2PpoCfg",
+  "unitree_g1_twist2_flat_runner_cfg",
+]

@@ -453,7 +453,7 @@ def tracking_joint_dof(
 	else:
 		weights = torch.tensor(dof_err_w, device=env.device, dtype=dof_diff.dtype)
 	dof_err = torch.sum(weights * torch.square(dof_diff), dim=-1)
-	return torch.exp(-0.15 * dof_err)
+	return torch.exp(-0.5 * dof_err)
 
 
 def tracking_joint_vel(
@@ -468,7 +468,7 @@ def tracking_joint_vel(
 	else:
 		weights = torch.tensor(dof_err_w, device=env.device, dtype=vel_diff.dtype)
 	vel_err = torch.sum(weights * torch.square(vel_diff), dim=-1)
-	return torch.exp(-0.01 * vel_err)
+	return torch.exp(-0.05 * vel_err)
 
 
 def tracking_root_translation_z(

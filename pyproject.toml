@@ -11,12 +11,14 @@ dependencies = [
   "mjlab",
   "torch==2.8.0",
   "onnxruntime",
+  "redis>=8.1.0",
 ]
 
 [project.entry-points."mjlab.tasks"]
 twist2_mjlab = "twist2_mjlab"
 
 [[tool.uv.index]]
+name = "pypi"
 url = "https://pypi.org/simple"
 
 [[tool.uv.index]]
@@ -27,3 +29,7 @@ explicit = true
 [tool.uv.sources]
 mjlab = { git = "https://github.com/mujocolab/mjlab", rev = "60eca4afee7fd6c2c5da55f6f1943bb4dd41b292" }
 torch = { index = "pytorch-cu129", marker = "sys_platform == 'linux'" }
+mujoco = { index = "pypi" }
+
+[tool.uv]
+override-dependencies = ["mujoco==3.7.0"]
