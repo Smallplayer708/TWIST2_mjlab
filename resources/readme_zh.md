@@ -294,12 +294,44 @@ TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl \
   ./deploy/play_sim_twist2.sh
 ```
 
-**使用内置的可微 aux 策略（world model，30K）：**
+#### 使用带 aux（可微辅助目标）策略的步骤说明
+
+可微 aux 只是**训练时**的方法；导出的 ONNX 和普通策略完全一致（输入 `(1, 1524)`、输出 `(1, 29)`），因此部署流程不变。分两种情况：
+
+**A. 直接使用内置的 aux 策略（world model，30K）**
 
 ```bash
+# A1) sim2sim（不需要 Redis / VR）
 TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl \
   ./deploy/play_sim_twist2.sh resources/pretrained_aux.onnx
+
+# A2) 实时遥操作仿真（需要 Redis + teleop 发布端，见「实时遥操作仿真（Redis 链路）」）
+bash deploy/play_sim_twist2_redis.sh resources/pretrained_aux.onnx
 ```
+
+**B. 使用自己训练的 aux checkpoint**
+
+```bash
+# B1) 训练时开启 aux：环境产出 aux 观测组（TWIST2_ENABLE_AUX=1）+ 辅助损失（aux-coef > 0）
+TWIST2_ENABLE_AUX=1 TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train_twist2.sh 0 \
+  --agent.algorithm.aux-mode world_model \
+  --agent.algorithm.aux-coef 0.1 \
+  --agent.algorithm.aux-coef-warmup-iters 1000 \
+  --agent.algorithm.aux-model-lr 3e-4
+# checkpoint 位于：logs/rsl_rl/g1_twist2_flat/<RUN>/model_*.pt
+
+# B2) 导出 ONNX
+TWIST2_MOTION_FILE=/path/to/enriched/sub1_clothesstand_000.pkl \
+  uv run python deploy/export_onnx.py logs/rsl_rl/g1_twist2_flat/<RUN>/model_29999.pt
+# 结果：logs/rsl_rl/g1_twist2_flat/<RUN>/<RUN>.onnx
+
+# B3) 用该 ONNX 跑 sim2sim 或遥操作仿真（同 A1 / A2）
+TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl \
+  ./deploy/play_sim_twist2.sh logs/rsl_rl/g1_twist2_flat/<RUN>/<RUN>.onnx
+bash deploy/play_sim_twist2_redis.sh logs/rsl_rl/g1_twist2_flat/<RUN>/<RUN>.onnx
+```
+
+> 部署时**不需要**世界模型和 aux 观测：`L_aux`、`aux_state`、`aux_ref_future` 只存在于训练侧，不会进 ONNX。
 
 和训练、播放一样，TWIST2 与 SEED 的 sim2sim 启动器也是彼此独立的：你可以按需使用任意一个，或者都用来对比结果。
 
