@@ -37,6 +37,13 @@ _JOINT_VEL_SCALE_WITH_ANKLE_MASK = tuple(
 
 _TWIST2_BASE_MASS_RANGE = (-3.0, 3.0)
 _TWIST2_MOTOR_STRENGTH_RANGE = (0.8, 1.2)
+
+# Reward preset. ``upstream`` reproduces the original ZhaoLong0808/TWIST2_mjlab
+# reward set (tracking weights 2.0/0.2/1.0/... and no stability rewards);
+# ``tuned`` (default) is this fork's tuning. Resolved once at import time from
+# ``TWIST2_REWARD_PRESET``.
+_REWARD_PRESET = os.environ.get("TWIST2_REWARD_PRESET", "tuned").strip().lower()
+_UPSTREAM_REWARDS = _REWARD_PRESET == "upstream"
 _TWIST2_DEFAULT_NUM_ENVS = 4096
 
 
@@ -57,45 +64,49 @@ def _feet_ground_sensor_cfg(*, track_air_time: bool = False) -> ContactSensorCfg
 
 
 def _twist2_tracking_reward_cfg() -> dict[str, RewardTermCfg]:
+  joint_dof_weight = 2.0 if _UPSTREAM_REWARDS else 6.0
+  joint_vel_weight = 0.2 if _UPSTREAM_REWARDS else 0.6
+  root_weight = 1.0 if _UPSTREAM_REWARDS else 2.0
+  keybody_weight = 2.0 if _UPSTREAM_REWARDS else 6.0
   return {
     "tracking_joint_dof": RewardTermCfg(
       func=twist2_rewards.tracking_joint_dof,
-      weight=6.0,
+      weight=joint_dof_weight,
       params={"command_name": "motion"},
     ),
     "tracking_joint_vel": RewardTermCfg(
       func=twist2_rewards.tracking_joint_vel,
-      weight=0.6,
+      weight=joint_vel_weight,
       params={"command_name": "motion"},
     ),
     "tracking_root_translation_z": RewardTermCfg(
       func=twist2_rewards.tracking_root_translation_z,
-      weight=2.0,
+      weight=root_weight,
       params={"command_name": "motion"},
     ),
     "tracking_root_rotation": RewardTermCfg(
       func=twist2_rewards.tracking_root_rotation,
-      weight=2.0,
+      weight=root_weight,
       params={"command_name": "motion"},
     ),
     "tracking_root_linear_vel": RewardTermCfg(
       func=twist2_rewards.tracking_root_linear_vel,
-      weight=2.0,
+      weight=root_weight,
       params={"command_name": "motion"},
     ),
     "tracking_root_angular_vel": RewardTermCfg(
       func=twist2_rewards.tracking_root_angular_vel,
-      weight=2.0,
+      weight=root_weight,
       params={"command_name": "motion"},
     ),
     "tracking_keybody_pos": RewardTermCfg(
       func=twist2_rewards.tracking_keybody_pos,
-      weight=6.0,
+      weight=keybody_weight,
       params={"command_name": "motion"},
     ),
     "tracking_keybody_pos_global": RewardTermCfg(
       func=twist2_rewards.tracking_keybody_pos_global,
-      weight=6.0,
+      weight=keybody_weight,
       params={"command_name": "motion"},
     ),
   }
@@ -103,7 +114,7 @@ def _twist2_tracking_reward_cfg() -> dict[str, RewardTermCfg]:
 
 def _twist2_regularization_reward_cfg() -> dict[str, RewardTermCfg]:
   all_joints = SceneEntityCfg("robot", joint_names=(".*",))
-  return {
+  rewards = {
     "alive": RewardTermCfg(func=env_mdp.is_alive, weight=0.5),
     "feet_slip": RewardTermCfg(
       func=twist2_rewards.feet_slip,
@@ -174,35 +185,44 @@ def _twist2_regularization_reward_cfg() -> dict[str, RewardTermCfg]:
       weight=-2e-4,
       params={"asset_cfg": all_joints},
     ),
-    # ------------------------------------------------------------------
-    # Stability rewards (adapted from IHMC IsaacLab)
-    # ------------------------------------------------------------------
-    "com_in_support_polygon": RewardTermCfg(
-      func=twist2_rewards.simplified_com_in_support_polygon,
-      weight=0.1,
-      params={"feet_sensor_cfg": SceneEntityCfg("feet_ground_contact")},
-    ),
-    "capture_point_in_support_polygon": RewardTermCfg(
-      func=twist2_rewards.simplified_capture_point_in_support_polygon,
-      weight=0.1,
-      params={"feet_sensor_cfg": SceneEntityCfg("feet_ground_contact")},
-    ),
-    "ankle_hip_step": RewardTermCfg(
-      func=twist2_rewards.AnkleHipStepReward,
-      weight=0.05,
-      params={"feet_sensor_cfg": SceneEntityCfg("feet_ground_contact")},
-    ),
-    "linear_momentum_change": RewardTermCfg(
-      func=twist2_rewards.LinearMomentumChangePenalty,
-      weight=1e-6,
-      params={},
-    ),
-    "angular_momentum_change": RewardTermCfg(
-      func=twist2_rewards.AngularMomentumChangePenalty,
-      weight=1e-5,
-      params={},
-    ),
   }
+
+  if not _UPSTREAM_REWARDS:
+    # ------------------------------------------------------------------
+    # Stability rewards (adapted from IHMC IsaacLab). Not part of the
+    # original ZhaoLong0808/TWIST2_mjlab reward set.
+    # ------------------------------------------------------------------
+    rewards.update(
+      {
+        "com_in_support_polygon": RewardTermCfg(
+          func=twist2_rewards.simplified_com_in_support_polygon,
+          weight=0.1,
+          params={"feet_sensor_cfg": SceneEntityCfg("feet_ground_contact")},
+        ),
+        "capture_point_in_support_polygon": RewardTermCfg(
+          func=twist2_rewards.simplified_capture_point_in_support_polygon,
+          weight=0.1,
+          params={"feet_sensor_cfg": SceneEntityCfg("feet_ground_contact")},
+        ),
+        "ankle_hip_step": RewardTermCfg(
+          func=twist2_rewards.AnkleHipStepReward,
+          weight=0.05,
+          params={"feet_sensor_cfg": SceneEntityCfg("feet_ground_contact")},
+        ),
+        "linear_momentum_change": RewardTermCfg(
+          func=twist2_rewards.LinearMomentumChangePenalty,
+          weight=1e-6,
+          params={},
+        ),
+        "angular_momentum_change": RewardTermCfg(
+          func=twist2_rewards.AngularMomentumChangePenalty,
+          weight=1e-5,
+          params={},
+        ),
+      }
+    )
+
+  return rewards
 
 
 def _twist2_reward_cfg() -> dict[str, RewardTermCfg]:

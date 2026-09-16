@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -34,6 +35,13 @@ _HIP_ROLL_JOINT_NAMES = (
   "right_hip_roll_joint",
 )
 _G = 9.81  # m/s²
+
+# Reward preset. ``upstream`` reproduces the original ZhaoLong0808/TWIST2_mjlab
+# tracking shaping; ``tuned`` (default) is this fork's sharper shaping. Resolved
+# once at import time from ``TWIST2_REWARD_PRESET``.
+_REWARD_PRESET = os.environ.get("TWIST2_REWARD_PRESET", "tuned").strip().lower()
+_JOINT_DOF_EXP = 0.15 if _REWARD_PRESET == "upstream" else 0.5
+_JOINT_VEL_EXP = 0.01 if _REWARD_PRESET == "upstream" else 0.05
 
 
 def _get_robot(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> Entity:
@@ -453,7 +461,7 @@ def tracking_joint_dof(
 	else:
 		weights = torch.tensor(dof_err_w, device=env.device, dtype=dof_diff.dtype)
 	dof_err = torch.sum(weights * torch.square(dof_diff), dim=-1)
-	return torch.exp(-0.5 * dof_err)
+	return torch.exp(-_JOINT_DOF_EXP * dof_err)
 
 
 def tracking_joint_vel(
@@ -468,7 +476,7 @@ def tracking_joint_vel(
 	else:
 		weights = torch.tensor(dof_err_w, device=env.device, dtype=vel_diff.dtype)
 	vel_err = torch.sum(weights * torch.square(vel_diff), dim=-1)
-	return torch.exp(-0.05 * vel_err)
+	return torch.exp(-_JOINT_VEL_EXP * vel_err)
 
 
 def tracking_root_translation_z(

@@ -527,6 +527,7 @@ TWIST2_ENABLE_AUX=1 TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train
 - 监控曲线：`Loss/aux`（辅助损失）、`Loss/world_model`（世界模型监督误差，应下降）、`Loss/aux_coef`（按 warmup 从 0 升到目标值）。
 - **要判断净收益，必须跑对照**：用同一配置、同一 seed 跑一条 `TWIST2_ENABLE_AUX=0` 的基线，再和 aux 对比 `Metrics/motion/error_*`、`Train/mean_episode_length` 与 `Episode_Termination/*`。
 - aux 目标与奖励权重**完全解耦**：它直接从参考运动取关节 pos/vel、root pos/rpy、key-body，不读取也不修改任何奖励项。`aux_*_weight` 只是辅助损失内部的权重。
+- **奖励预设**：默认 `TWIST2_REWARD_PRESET=tuned`（本仓库当前配置）。若要和原版 `ZhaoLong0808/TWIST2_mjlab` 的奖励对齐做对照，加 `TWIST2_REWARD_PRESET=upstream`：跟踪权重回到 `2.0/0.2/1.0/…`、陡度回到 `exp(-0.15·err)`/`exp(-0.01·err)`，并且**不包含**本分支新增的稳定性奖励（`com/capture_in_support_polygon`、`ankle_hip_step`、`*_momentum_change`）。该开关在进程启动时读取，只影响奖励，不影响 aux 机制。
 - 部署时不需要世界模型：`L_aux`、`aux_state`、`aux_ref_future` 都只存在于训练侧，导出的 ONNX 仍然只是 actor。
 
 ## 动作文件格式
