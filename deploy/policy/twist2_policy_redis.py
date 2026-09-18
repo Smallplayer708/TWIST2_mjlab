@@ -40,6 +40,7 @@ from deploy.common.udp_sync import (
     pack_action,
     unpack_state,
 )
+from deploy.common.smoothing import add_smoothing_args, build_smoother
 
 REDIS_ACTION_KEY = "action_body_unitree_g1_with_hands"
 
@@ -61,7 +62,16 @@ def main() -> None:
     parser.add_argument("onnx_path", help="Path to twist2 .onnx model")
     parser.add_argument("--redis-ip", default="localhost", help="Redis host (teleop publisher)")
     parser.add_argument("--redis-port", type=int, default=6379, help="Redis port")
+    add_smoothing_args(parser)
     args = parser.parse_args()
+
+    try:
+        smoother = build_smoother(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if smoother.enabled:
+        print(f"Mimic smoothing: leg={args.leg_smooth_alpha}, arm={args.arm_smooth_alpha}, "
+              f"body={args.smooth_body}, window={args.smooth_window_size}")
 
     session = ort.InferenceSession(args.onnx_path, providers=["CPUExecutionProvider"])
     inp_name = session.get_inputs()[0].name
@@ -107,6 +117,7 @@ def main() -> None:
                     mimic = np.asarray(json.loads(msg), dtype=np.float32)
                 except (json.JSONDecodeError, TypeError):
                     pass
+            mimic = smoother.apply(mimic)
 
             # 2. Drain to latest state packet from sim.
             latest_data = None

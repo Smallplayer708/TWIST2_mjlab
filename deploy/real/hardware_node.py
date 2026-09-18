@@ -25,6 +25,7 @@ from deploy.common.udp_sync import (
     ACTION_BYTES, UDP_HOST, UDP_POLICY_PORT, UDP_SIM_PORT,
     pack_state, unpack_action,
 )
+from deploy.common.smoothing import EMARetainFilter, validate_alpha, validate_pd_gain
 from deploy.real.g1_robot_constants import (
     KNEES_BENT_KEYFRAME,
     STIFFNESS_5020, DAMPING_5020,
@@ -65,6 +66,8 @@ POLICY_JOINT_NAMES = [
 ]
 NUM_JOINTS = len(POLICY_JOINT_NAMES)   # 29
 CONTROL_DT = 0.02                      # 50 Hz
+LEG_DOF = list(range(12))
+ARM_DOF = list(range(15, 29))
 
 # ---------------------------------------------------------------------------
 # PD gains — mjlab gains per POLICY_JOINT_NAMES order
@@ -139,6 +142,18 @@ _KD = np.array([
     DAMPING_4010,        # 27 right_wrist_pitch
     DAMPING_4010,        # 28 right_wrist_yaw
 ], dtype=np.float64)
+
+
+def _scaled_pd_gains(leg_gain, arm_gain):
+    """Return a copy of _KP/_KD with leg and arm gains scaled (waist untouched)."""
+    kp = _KP.copy()
+    kd = _KD.copy()
+    for dof_idx, gain in ((LEG_DOF, leg_gain), (ARM_DOF, arm_gain)):
+        if gain != 1.0:
+            kp[dof_idx] *= gain
+            kd[dof_idx] *= gain
+    return kp, kd
+
 
 # ---------------------------------------------------------------------------
 # Default pose (same source as sim_node.py)
@@ -216,7 +231,25 @@ def main():
                         help="Network interface for robot DDS (default: eth0)")
     parser.add_argument("--policy-ip", default=UDP_HOST,
                         help="IP of the policy node (default: 127.0.0.1)")
+    parser.add_argument("--leg_pd_gain", type=float, default=1.0,
+                        help="Scale the 12 leg joints' kp/kd (>1 = stiffer/damped)")
+    parser.add_argument("--arm_pd_gain", type=float, default=1.0,
+                        help="Scale the 14 arm joints' kp/kd (>1 = stiffer/damped)")
+    parser.add_argument("--leg_ema_alpha", type=float, default=0.0,
+                        help="EMA low-pass on the 12 leg PD targets (0=off, 0.5~0.7)")
     args = parser.parse_args()
+
+    try:
+        leg_gain = validate_pd_gain("--leg_pd_gain", args.leg_pd_gain)
+        arm_gain = validate_pd_gain("--arm_pd_gain", args.arm_pd_gain)
+        leg_ema_alpha = validate_alpha("--leg_ema_alpha", args.leg_ema_alpha)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    kp, kd = _scaled_pd_gains(leg_gain, arm_gain)
+    leg_ema = EMARetainFilter(leg_ema_alpha, len(LEG_DOF), initial=DEFAULT_POS[:12])
+    print(f"[PD] leg gain x{leg_gain}, arm gain x{arm_gain}, "
+          f"leg_ema_alpha={leg_ema_alpha}")
 
     robot = unitree_interface.UnitreeInterface.create_g1(args.net)
     robot.set_control_mode(unitree_interface.ControlMode.PR)
@@ -262,7 +295,11 @@ def main():
                 # fields used only by the sim viewer — ignore on hardware.
                 _, last_target, _, _, _ = unpack_action(latest_raw)
 
-            _send_pd(robot, last_target, _KP, _KD)
+            if leg_ema.enabled:
+                last_target = last_target.copy()
+                last_target[:12] = leg_ema.apply(last_target[:12])
+
+            _send_pd(robot, last_target, kp, kd)
 
             # select → emergency stop: damp at current position, exit immediately
             # B → graceful stop: interpolate to rest in finally block

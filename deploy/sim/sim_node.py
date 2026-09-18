@@ -6,6 +6,7 @@ The reference motion pose sent back by the policy is rendered as a
 semi-transparent green ghost overlay in the viewer.
 """
 
+import argparse
 import copy
 import math
 import os
@@ -26,6 +27,7 @@ from deploy.common.udp_sync import (
     UDP_HOST, UDP_SIM_PORT, UDP_POLICY_PORT,
     ACTION_BYTES, pack_state, unpack_action,
 )
+from deploy.common.smoothing import EMARetainFilter, validate_alpha, validate_pd_gain
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -57,6 +59,27 @@ def _resolve_keyframe(joint_names, keyframe):
 
 
 DEFAULT_POS = _resolve_keyframe(POLICY_JOINT_NAMES, KNEES_BENT_KEYFRAME)
+
+LEG_DOF = list(range(12))
+ARM_DOF = list(range(15, 29))
+
+
+def _scale_pd_gains(model, ctrl_idx, leg_gain, arm_gain):
+    """Scale position-actuator kp/kd like the original TWIST2.
+
+    mjlab position actuators store ``gainprm[0]=kp``, ``biasprm[1]=-kp`` and
+    ``biasprm[2]=-kd`` (see mjlab/utils/spec.py:223-225).  Torque limits are
+    intentionally left untouched so sim saturation matches the real robot.
+    """
+    for dof_idx, gain in ((LEG_DOF, leg_gain), (ARM_DOF, arm_gain)):
+        if gain == 1.0:
+            continue
+        ids = ctrl_idx[dof_idx]
+        model.actuator_gainprm[ids, 0] *= gain
+        model.actuator_biasprm[ids, 1] *= gain
+        model.actuator_biasprm[ids, 2] *= gain
+    print(f"[PD] leg gain x{leg_gain} (kp0={model.actuator_gainprm[ctrl_idx[0], 0]:.1f}), "
+          f"arm gain x{arm_gain}")
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +157,22 @@ def build_model():
 # Main loop
 # ---------------------------------------------------------------------------
 def main():
+    parser = argparse.ArgumentParser(description="TWIST2 sim2sim physics node")
+    parser.add_argument("--leg_pd_gain", type=float, default=1.0,
+                        help="Scale the 12 leg joints' kp/kd (>1 = stiffer/damped)")
+    parser.add_argument("--arm_pd_gain", type=float, default=1.0,
+                        help="Scale the 14 arm joints' kp/kd (>1 = stiffer/damped)")
+    parser.add_argument("--leg_ema_alpha", type=float, default=0.0,
+                        help="EMA low-pass on the 12 leg PD targets (0=off, 0.5~0.7)")
+    args = parser.parse_args()
+
+    try:
+        leg_gain = validate_pd_gain("--leg_pd_gain", args.leg_pd_gain)
+        arm_gain = validate_pd_gain("--arm_pd_gain", args.arm_pd_gain)
+        leg_ema_alpha = validate_alpha("--leg_ema_alpha", args.leg_ema_alpha)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     model = build_model()
     data = mujoco.MjData(model)
 
@@ -150,6 +189,9 @@ def main():
     qpos_idx = np.array(qpos_idx)
     qvel_idx = np.array(qvel_idx)
     ctrl_idx = np.array(ctrl_idx)
+
+    _scale_pd_gains(model, ctrl_idx, leg_gain, arm_gain)
+    leg_ema = EMARetainFilter(leg_ema_alpha, len(LEG_DOF), initial=DEFAULT_POS[:12])
 
     pelvis_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
     assert pelvis_body_id >= 0
@@ -230,6 +272,9 @@ def main():
                 _, target_pos, ref_root_pos, ref_root_quat, ref_joint_pos = (
                     unpack_action(latest_action)
                 )
+                if leg_ema.enabled:
+                    target_pos = target_pos.copy()
+                    target_pos[:12] = leg_ema.apply(target_pos[:12])
                 data.ctrl[ctrl_idx] = target_pos
 
                 # Update ghost overlay

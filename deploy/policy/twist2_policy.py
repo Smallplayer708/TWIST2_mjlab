@@ -31,6 +31,7 @@ from deploy.common.udp_sync import (
     UDP_HOST, UDP_SIM_PORT, UDP_POLICY_PORT,
     STATE_BYTES, unpack_state, pack_action,
 )
+from deploy.common.smoothing import add_smoothing_args, build_smoother
 
 # ---------------------------------------------------------------------------
 # Constants (must exactly match training)
@@ -359,7 +360,16 @@ def main():
     parser.add_argument("onnx_path", help="Path to twist2 .onnx model")
     parser.add_argument("--motion-file", required=True, help="Path to .pkl or .yaml motion file")
     parser.add_argument("--motion-index", type=int, default=0, help="Motion index in dataset")
+    add_smoothing_args(parser)
     args = parser.parse_args()
+
+    try:
+        smoother = build_smoother(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if smoother.enabled:
+        print(f"Mimic smoothing: leg={args.leg_smooth_alpha}, arm={args.arm_smooth_alpha}, "
+              f"body={args.smooth_body}, window={args.smooth_window_size}")
 
     # Load ONNX
     session = ort.InferenceSession(args.onnx_path, providers=["CPUExecutionProvider"])
@@ -418,6 +428,7 @@ def main():
             mimic, ref_root_pos, ref_root_quat, ref_joint_pos = (
                 playback.get_mimic_and_ref_pose()
             )
+            mimic = smoother.apply(mimic)
             proprio = build_proprio(
                 joint_pos, joint_vel, root_quat, body_ang_vel, last_action,
             )
@@ -452,7 +463,11 @@ def main():
             )
 
             # 5. Advance motion playback
+            prev_phase = playback.phase
             playback.step(dt)
+            if (prev_phase == PlaybackState.BLEND_OUT
+                    and playback.phase == PlaybackState.BLEND_IN):
+                smoother.reset()
 
     except KeyboardInterrupt:
         pass

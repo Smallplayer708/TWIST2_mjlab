@@ -415,6 +415,91 @@ bash deploy/play_sim_twist2_redis.sh \
   ```
 - 或者写一个「PKL → Redis」的 50 Hz 回放发布器，复用 `deploy/policy/twist2_policy.py` 里的 `build_mimic_from_frame`，把录制的动作当作遥操作流写进同一个 key。这样就可以在没有 VR 的情况下跑完整的 Redis 链路；把上面的第 2 步替换成该回放器即可。
 
+**部署调参（低层 PD/EMA + mimic 平滑）：**
+
+本仓库的 deploy 侧已加入原版 TWIST2 `deploy_real/` 里的腿部 PD 增益、EMA 低通与 mimic 平滑开关。
+所有参数**默认全部关闭或中性（1.0 / 0.0）**，不设置时行为与之前逐位一致；参数带范围校验，越界会在启动时直接报错退出。
+
+*改动概览：*
+
+- 新增 `deploy/common/smoothing.py`：共享的 EMA/滑动窗滤波器、35D mimic 平滑流水线，以及参数校验和共享 argparse 接线（`validate_alpha`、`validate_pd_gain`、`add_smoothing_args`、`build_smoother`）。
+- 新增 `deploy/common/forward_env_args.sh`：三个启动脚本共用的「环境变量 → 命令行参数」透传，避免各脚本各写一份。
+- `deploy/sim/sim_node.py`：新增 `--leg_pd_gain`、`--arm_pd_gain`、`--leg_ema_alpha`。增益只缩放位置执行器的 kp/kd（`gainprm[0]`、`biasprm[1]`、`biasprm[2]`），**不缩放力矩上限**，让 sim 的力矩饱和行为与真机一致；腿 EMA 作用在写 `data.ctrl` 前的 12 个腿关节目标上。
+- `deploy/real/hardware_node.py`：新增同样的三个参数。策略环里用缩放后的 kp/kd，并对 12 个腿目标做 EMA；启动插值到默认姿态、以及 SELECT/B 的减阻尼停机仍使用原始 `_KP`/`_KD`，不受调参影响。
+- `deploy/policy/twist2_policy.py`、`deploy/policy/twist2_policy_redis.py`：新增 `--leg_smooth_alpha`、`--arm_smooth_alpha`、`--smooth_body`、`--smooth_window_size`，在拼观测/推理前对 35D mimic 做平滑（pkl 策略在动作循环重启时清空平滑状态）。
+
+> **低层参数和 mimic 参数的区别**：低层参数（`PD_GAIN`/`LEG_EMA_ALPHA`）直接改执行器/电机的 PD 刚度和下发目标；mimic 参数改的是**策略的输入观测**（参考动作），不直接改电机。前者用来补接触/跟踪误差，后者用来压参考动作的抖动。二者可叠加使用。
+
+*参数说明：*
+
+| 参数 | 作用位置 | 命令行 | 默认 | 取值范围 | 公式 / 方向 | 推荐值 |
+|------|----------|--------|------|----------|-------------|--------|
+| `TWIST2_LEG_PD_GAIN` | sim / 真机 | `--leg_pd_gain` | `1.0` | `(0, 2.0]` | 腿 12 关节 kp、kd 同时乘该系数 | 真机 1.5~2.0；sim 2.0 |
+| `TWIST2_ARM_PD_GAIN` | sim / 真机 | `--arm_pd_gain` | `1.0` | `(0, 2.0]` | 臂 14 关节（索引 15~28）kp、kd 乘该系数 | 1.0~1.5 |
+| `TWIST2_LEG_EMA_ALPHA` | sim / 真机 | `--leg_ema_alpha` | `0.0` | `[0, 1]` | `t = a·prev + (1−a)·new`，**越大越平滑** | 0.5~0.7 |
+| `TWIST2_LEG_SMOOTH_ALPHA` | policy | `--leg_smooth_alpha` | `0.0` | `[0, 1]` | `s = a·new + (1−a)·prev`，**越大越不平滑** | 0.8 |
+| `TWIST2_ARM_SMOOTH_ALPHA` | policy | `--arm_smooth_alpha` | `0.0` | `[0, 1]` | 同上一行，作用于 mimic 臂段 `[21:35]` | 0.5~0.8 |
+| `TWIST2_SMOOTH_BODY` | policy | `--smooth_body` | `0.0` | `[0, 1]` | `s = a·new + (1−a)·prev`，作用于完整 35D mimic | 0.3~0.5 |
+| `TWIST2_SMOOTH_WINDOW` | policy | `--smooth_window_size` | `1` | `>= 1` 整数 | 最近 N 帧 mimic 的算术平均；`1` 表示关闭 | 3~5 |
+
+几点具体说明：
+
+- **`LEG_PD_GAIN` 的用途**：原版在 MuJoCo 软接触下腿跟踪会衰减，把腿 kp/kd 整体放大可补偿，官方建议 2.0。真机上它让电机更硬更阻尼，能改善落地/跟踪，但过大会放大接触冲击。
+- **`LEG_PD_GAIN` 不会放大力矩上限**：sim 用的是 mjlab 里与真机一致的电机力矩上限（如 5020/7520/4010 的额定值），所以 sim 里调稳后再上真机，饱和行为是可预期的；真机 kp 提高后若力矩打满，表现为跟踪变差而不是获得额外扭矩。
+- **两个 alpha 方向相反**：`LEG_EMA_ALPHA` 的 `a` 是「保留旧值的比例」，所以越大越平滑；其余三个 mimic alpha 的 `a` 是「新值的权重」，越大越跟手、平滑越弱。不要混用直觉。
+- **`LEG_SMOOTH_ALPHA` 的掩码**：只平滑 35D mimic 的 `[0:6]`（root 的 vx、vy、z、roll、pitch、yaw_vel）和 `[6:18]`（12 个腿关节），臂和其余部分不动，对应原版遥操作里「腿+root 去抖、手臂保低延迟」的做法。
+- **`SMOOTH_WINDOW`**：滑动窗均值比 EMA 更“重”，会引入约 `(N−1)/2 × 20ms` 的相位延迟，适合消掉高频抖动，不适合快速动作的开头；一般和 `SMOOTH_BODY` 二选一，避免过平滑。
+- **pkl 策略的绿色 ghost**：mimic 平滑作用于策略输入；ghost 仍按原始参考动作渲染。如果发现 ghost 与实际跟踪有偏差，这是预期现象（redis 链路的 ghost 由 mimic 反推，会同步平滑）。
+
+*怎么使用：*
+
+两种等价方式，可任意组合。**推荐用环境变量**，因为启动脚本会自动透传给正确的节点。
+
+方式一：环境变量 + 启动脚本（推荐）
+
+```bash
+# sim2sim：同时启用低层腿 PD 增益和腿目标低通
+TWIST2_LEG_PD_GAIN=2.0 TWIST2_LEG_EMA_ALPHA=0.6 \
+  bash deploy/play_sim_twist2.sh resources/pretrained.onnx
+
+# sim2sim：只压参考动作的腿/root 抖动
+TWIST2_LEG_SMOOTH_ALPHA=0.8 bash deploy/play_sim_twist2.sh resources/pretrained.onnx
+
+# Redis 遥操作链路
+TWIST2_LEG_PD_GAIN=1.5 TWIST2_LEG_EMA_ALPHA=0.5 \
+  bash deploy/play_sim_twist2_redis.sh resources/pretrained_aux.onnx
+
+# 真机
+TWIST2_LEG_PD_GAIN=1.5 TWIST2_LEG_EMA_ALPHA=0.5 \
+  bash deploy/play_real_twist2.sh /path/to/model.onnx
+```
+
+方式二：直接传给节点（不经过启动脚本时）
+
+```bash
+# 低层节点
+python deploy/sim/sim_node.py --leg_pd_gain 2.0 --leg_ema_alpha 0.6
+python deploy/real/hardware_node.py --net eth0 --leg_pd_gain 1.5 --arm_pd_gain 1.2
+
+# policy 节点
+python deploy/policy/twist2_policy.py model.onnx --motion-file motion.pkl \
+  --leg_smooth_alpha 0.8 --smooth_body 0.3 --smooth_window_size 5
+```
+
+*推荐调参顺序：*
+
+1. **先固定模型，只调低层 `LEG_PD_GAIN`**：从 1.0 → 1.5 → 2.0，找腿部跟踪最好且不抖/不弹的档位。sim 里可到 2.0。
+2. **再叠加 `LEG_EMA_ALPHA`（0.3 → 0.7）**降腿的高频抖动。注意它是对 PD 目标做低通，太大会让腿反应变迟钝。
+3. **mimic 侧最后调**：参考动作本身抖动明显时用 `LEG_SMOOTH_ALPHA`（腿+root）或 `ARM_SMOOTH_ALPHA`（臂）；需要更重的去抖再用 `SMOOTH_WINDOW`，但它有相位延迟。
+4. **真机从小值开始**：先 `LEG_PD_GAIN=1.0`（默认）跑通，再逐步加到 1.5 左右；随时准备 SELECT 急停。真机的臂增益默认 1.0 即可。
+
+*注意事项：*
+
+- 取值范围会被校验：`PD_GAIN ∉ (0, 2.0]`、`alpha ∉ [0, 1]`、`SMOOTH_WINDOW < 1` 都会在启动时报错退出，不会带病上机。
+- 启动与停机不用缩放后的增益：`hardware_node.py` 只有在进入 50 Hz 策略环后才应用 `leg_pd_gain`/`arm_pd_gain` 和 EMA，START 插值、SELECT/B 停机仍是默认增益。
+- 如果上游原版 teleop 已经配了同类平滑，Redis 链路再开 `SMOOTH_*` 会双重平滑；默认全关可规避，需要时二选一。
+- 这些只是**部署/推理期**的开关，不影响也不需要重训；训练侧另有域随机化的电机强度（`_TWIST2_MOTOR_STRENGTH_RANGE`）。
+
 ### 6) 硬件部署
 
 真机部署与 sim2sim 共用同一个 policy 节点和 UDP 协议，只是把 MuJoCo 仿真换成了一个 50 Hz 的硬件循环：通过内置的 Unitree SDK2 包装层读取 G1 的 IMU 与关节状态，再把 policy 输出的关节目标以 PD 控制下发到电机，PD 增益与 MJLab G1 定义保持一致。
@@ -468,6 +553,10 @@ TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl \
 | `TWIST2_MOTION_FILE` | 动作参考文件（与 sim2sim 相同） |
 | `TWIST2_MOTION_INDEX` | dataset YAML 中的动作索引（默认 `0`） |
 | `TWIST2_REAL_NET` | 连接 G1 的 DDS 网络接口（默认 `eth0`） |
+
+sim2sim 一节的调参环境变量（`TWIST2_LEG_PD_GAIN`、`TWIST2_ARM_PD_GAIN`、`TWIST2_LEG_EMA_ALPHA`、
+`TWIST2_LEG_SMOOTH_ALPHA`、`TWIST2_ARM_SMOOTH_ALPHA`、`TWIST2_SMOOTH_BODY`、`TWIST2_SMOOTH_WINDOW`）
+同样会被 `play_real_twist2.sh` 透传。
 
 **安全建议：**
 

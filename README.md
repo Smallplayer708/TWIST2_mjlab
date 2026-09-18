@@ -327,6 +327,29 @@ sim_node (MuJoCo, 1000 Hz)        policy_node (ONNX, 50 Hz)
 | `TWIST2_MOTION_INDEX` | Index of the motion to play from a multi-motion dataset (default `0`) |
 | `TWIST2_INIT_YAW_DEG` | Initial robot yaw in degrees (default `0`) |
 
+**Deployment tuning parameters (optional):**
+
+These mirror the original TWIST2 deploy knobs (leg PD gain / low-pass, mimic smoothing). All are
+off or neutral by default, so leaving them unset keeps current behaviour. Each can be passed
+directly to the node or set as an environment variable that the launcher scripts forward.
+
+| Env var | Node | Flag | Default | Effect |
+|---------|------|------|---------|--------|
+| `TWIST2_LEG_PD_GAIN` | sim / hardware | `--leg_pd_gain` | `1.0` | Scale the 12 leg joints' kp/kd (>1 = stiffer/damped). Torque limits stay fixed so sim saturation matches the real robot. |
+| `TWIST2_ARM_PD_GAIN` | sim / hardware | `--arm_pd_gain` | `1.0` | Same for the 14 arm joints. |
+| `TWIST2_LEG_EMA_ALPHA` | sim / hardware | `--leg_ema_alpha` | `0.0` | EMA low-pass on the 12 leg PD targets, `t = a·prev + (1−a)·new` (larger = smoother). Try 0.5–0.7. |
+| `TWIST2_LEG_SMOOTH_ALPHA` | policy | `--leg_smooth_alpha` | `0.0` | EMA on the 35D mimic root + leg section, `s = a·new + (1−a)·prev` (larger = less smoothing). Try 0.8. |
+| `TWIST2_ARM_SMOOTH_ALPHA` | policy | `--arm_smooth_alpha` | `0.0` | EMA on the mimic arm joints (`[21:35]`). |
+| `TWIST2_SMOOTH_BODY` | policy | `--smooth_body` | `0.0` | EMA on the full 35D mimic before the policy (the original `smooth_body`). |
+| `TWIST2_SMOOTH_WINDOW` | policy | `--smooth_window_size` | `1` | Sliding-window mean length on the mimic; `1` disables. |
+
+Example:
+
+```bash
+TWIST2_LEG_PD_GAIN=2.0 TWIST2_LEG_EMA_ALPHA=0.6 \
+  ./deploy/play_sim_twist2.sh resources/pretrained.onnx
+```
+
 ### 6) Hardware deployment
 
 The real-hardware path reuses the same policy node and UDP protocol as sim2sim, and swaps the MuJoCo simulation for a 50 Hz loop that reads IMU + joint state from a Unitree G1 via a vendored SDK2 wrapper and applies the policy's joint targets with PD gains matched to the MJLab G1 definitions.
@@ -380,6 +403,10 @@ Same model-argument conventions as `play_sim_twist2.sh`: pass a `.pt` (auto-expo
 | `TWIST2_MOTION_FILE` | Motion reference (same as sim2sim) |
 | `TWIST2_MOTION_INDEX` | Motion index inside a dataset YAML (default `0`) |
 | `TWIST2_REAL_NET` | DDS network interface for the G1 (default `eth0`) |
+
+The tuning variables from the sim2sim section (`TWIST2_LEG_PD_GAIN`, `TWIST2_ARM_PD_GAIN`,
+`TWIST2_LEG_EMA_ALPHA`, `TWIST2_LEG_SMOOTH_ALPHA`, `TWIST2_ARM_SMOOTH_ALPHA`, `TWIST2_SMOOTH_BODY`,
+`TWIST2_SMOOTH_WINDOW`) are also forwarded by `play_real_twist2.sh`.
 
 **Safety notes:**
 

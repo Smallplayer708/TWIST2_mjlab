@@ -116,14 +116,18 @@ export PYTHONPATH="${PYTHONPATH:-}:${ROOT_DIR}:${ROOT_DIR}/src"
 # 5. Launch nodes
 # ---------------------------------------------------------------------------
 
+# Optional tuning passthrough (env vars, empty = node defaults).
+source "${SCRIPT_DIR}/common/forward_env_args.sh"
+
 # Policy (background)
 echo "Starting TWIST2 Policy Node (in background)..."
 uv run python deploy/policy/twist2_policy.py "${ONNX_MODEL}" \
   --motion-file "${MOTION_FILE}" \
-  --motion-index "${MOTION_INDEX}" &
+  --motion-index "${MOTION_INDEX}" \
+  "${POLICY_TUNE_ARGS[@]}" &
 
 sleep 2.0
 
 # Hardware (foreground)
 echo "Starting G1 Hardware Node (in foreground)..."
-uv run python deploy/real/hardware_node.py --net "${NET}"
+uv run python deploy/real/hardware_node.py --net "${NET}" "${LOWLEVEL_TUNE_ARGS[@]}"

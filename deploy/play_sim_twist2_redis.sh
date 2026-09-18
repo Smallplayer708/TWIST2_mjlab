@@ -34,12 +34,15 @@ trap cleanup SIGINT SIGTERM EXIT
 export PYTHONPATH="${PYTHONPATH:-}:${ROOT_DIR}:${ROOT_DIR}/src"
 cd "${ROOT_DIR}"
 
+# Optional tuning passthrough (env vars, empty = node defaults).
+source "${SCRIPT_DIR}/common/forward_env_args.sh"
+
 # Policy node (background)
 echo "Starting TWIST2 Redis Policy Node (background)..."
-uv run python deploy/policy/twist2_policy_redis.py "${ONNX_MODEL}" "$@" &
+uv run python deploy/policy/twist2_policy_redis.py "${ONNX_MODEL}" "$@" "${POLICY_TUNE_ARGS[@]}" &
 
 sleep 2.0
 
 # Sim node (foreground)
 echo "Starting Simulation Node (foreground)..."
-uv run python deploy/sim/sim_node.py
+uv run python deploy/sim/sim_node.py "${LOWLEVEL_TUNE_ARGS[@]}"
