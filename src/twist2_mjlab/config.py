@@ -44,6 +44,17 @@ _TWIST2_MOTOR_STRENGTH_RANGE = (0.8, 1.2)
 # ``TWIST2_REWARD_PRESET``.
 _REWARD_PRESET = os.environ.get("TWIST2_REWARD_PRESET", "tuned").strip().lower()
 _UPSTREAM_REWARDS = _REWARD_PRESET == "upstream"
+
+# AMP (Adversarial Motion Priors) is off by default. When enabled it adds a
+# buffer-only ``amp_style`` observation group and an ``amp_style`` reward term;
+# the discriminator itself is built by the runner (see ``rl/runner.py``).
+_AMP_ENABLED = os.environ.get("TWIST2_ENABLE_AMP", "").strip().lower() in (
+  "1",
+  "true",
+  "yes",
+  "on",
+)
+_AMP_WEIGHT = float(os.environ.get("TWIST2_AMP_WEIGHT", "0.3"))
 _TWIST2_DEFAULT_NUM_ENVS = 4096
 
 
@@ -220,6 +231,13 @@ def _twist2_regularization_reward_cfg() -> dict[str, RewardTermCfg]:
           params={},
         ),
       }
+    )
+
+  if _AMP_ENABLED:
+    rewards["amp_style"] = RewardTermCfg(
+      func=twist2_rewards.amp_reward,
+      weight=_AMP_WEIGHT,
+      params={"command_name": "motion"},
     )
 
   return rewards
@@ -556,6 +574,20 @@ def unitree_g1_pkl_tracking_custom_ppo_env_cfg(
             "command_name": "motion",
             "step_offsets": twist2_obs.AUX_REF_STEP_OFFSETS,
           },
+        )
+      },
+      concatenate_terms=True,
+      enable_corruption=False,
+    )
+
+  if _AMP_ENABLED:
+    # Buffer-only style feature for the AMP discriminator; never fed to
+    # actor/critic, so policy input dimensions are unchanged.
+    cfg.observations["amp_style"] = ObservationGroupCfg(
+      terms={
+        "state": ObservationTermCfg(
+          func=twist2_obs.amp_style_state,
+          params={"command_name": "motion"},
         )
       },
       concatenate_terms=True,

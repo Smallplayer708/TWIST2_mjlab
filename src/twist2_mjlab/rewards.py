@@ -13,7 +13,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 from mjlab.utils.lab_api.math import quat_apply_inverse, quat_error_magnitude, yaw_quat
 
-from twist2_mjlab.observations import FEET_BODY_NAMES, KEY_BODY_NAMES, get_motion_command, tracked_body_indices
+from twist2_mjlab.observations import FEET_BODY_NAMES, KEY_BODY_NAMES, amp_style_state, get_motion_command, tracked_body_indices
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -523,6 +523,37 @@ def tracking_root_angular_vel(
 	robot_ang_vel_b = command.robot.data.root_link_ang_vel_b
 	vel_err_sq = torch.sum(torch.square(ref_ang_vel_b - robot_ang_vel_b), dim=-1)
 	return torch.exp(-1.0 * vel_err_sq)
+
+
+def amp_reward(
+	env: ManagerBasedRlEnv,
+	command_name: str = "motion",
+) -> torch.Tensor:
+	"""Least-squares AMP style reward ``clamp(1 - 0.25 (D(s, s') - 1)^2, 0)``.
+
+	Returns zeros when AMP is disabled (no discriminator attached). The reward
+	consumes the discriminator but never trains it; training happens in
+	``rl/amp.py`` from the rollout buffer (with reset masking).
+	"""
+	disc = getattr(env, "amp_discriminator", None)
+	normalizer = getattr(env, "amp_normalizer", None)
+	if disc is None or normalizer is None:
+		return torch.zeros(env.num_envs, device=env.device)
+
+	from twist2_mjlab.rl.amp import REWARD_COEF  # local import avoids import cycle
+
+	s_next = amp_style_state(env, command_name)
+	s_prev = getattr(env, "_prev_amp_obs", None)
+	if s_prev is None:
+		env._prev_amp_obs = s_next.detach()
+		return torch.zeros(env.num_envs, device=env.device)
+
+	with torch.no_grad():
+		logits = disc(
+			normalizer.normalize(s_prev), normalizer.normalize(s_next)
+		).squeeze(-1)
+	env._prev_amp_obs = s_next.detach()
+	return torch.clamp(1.0 - REWARD_COEF * (logits - 1.0).pow(2), min=0.0)
 
 
 def tracking_keybody_pos(

@@ -530,6 +530,37 @@ TWIST2_ENABLE_AUX=1 TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train
 - **奖励预设**：默认 `TWIST2_REWARD_PRESET=tuned`（本仓库当前配置）。若要和原版 `ZhaoLong0808/TWIST2_mjlab` 的奖励对齐做对照，加 `TWIST2_REWARD_PRESET=upstream`：跟踪权重回到 `2.0/0.2/1.0/…`、陡度回到 `exp(-0.15·err)`/`exp(-0.01·err)`，并且**不包含**本分支新增的稳定性奖励（`com/capture_in_support_polygon`、`ankle_hip_step`、`*_momentum_change`）。该开关在进程启动时读取，只影响奖励，不影响 aux 机制。
 - 部署时不需要世界模型：`L_aux`、`aux_state`、`aux_ref_future` 都只存在于训练侧，导出的 ONNX 仍然只是 actor。
 
+## AMP（对抗式动作先验，可选）
+
+`TWIST2_ENABLE_AMP=1` 启用一个改良版的 AMP，作为**纯训练期**的风格先验：不改变 actor/critic 输入，判别器/专家 buffer/`amp_style` 观测都只存在于训练侧，不进 ONNX。
+
+### 相对早期实现修了什么
+
+早期集成里判别器必然坍塌（run `2026-09-10_11-41-16`：`AMP/disc_loss 9.6→0.002`、`AMP/grad_penalty→0.0001`、`Episode_Reward/amp_style≈0`，而 tracking 正常收敛）。原因与修法：
+
+| 问题 | 修法 |
+|------|------|
+| 专家 30 fps vs 策略 50 Hz（`‖Δq‖` 幅值域差，判别器学个阈值就 100% 分开） | 专家过渡改为从**环境 motion library 按 `env.step_dt` 采样**，与策略同 dt、同关节顺序、同单位 |
+| 风格特征太弱（只有 29D 关节角） | 升为 59D：`joint_pos(29) + joint_vel(29) + root_z(1)`，专家/策略同一 extractor |
+| 无共享归一化 | 专家与策略共用 `RunningMeanStd` |
+| `DISC_LR=1e-3` 过高 | 默认 `3e-5` + logit 正则 + 专家**标签平滑** |
+| LSGAN 配 WGAN-GP 目标不自洽 | 改为自洽的 LSGAN + **R1** |
+| reset 跨界 transition 被当假样本 | 策略过渡取自 rollout buffer，用 `dones` 掩码丢弃跨界项 |
+| 判别器过强导致 style reward 恒 0 | **acc 超过 `TWIST2_AMP_ACC_TARGET` 就跳过判别器更新**（仍每轮评估，acc 回落自动恢复） |
+| `amp_style` 权重 0.05 太小 | 默认 `TWIST2_AMP_WEIGHT=0.3` |
+
+### 使用
+
+```bash
+TWIST2_ENABLE_AMP=1 TWIST2_REWARD_PRESET=upstream \
+TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train_twist2.sh 0 \
+  --agent.max-iterations 30000 --agent.logger tensorboard
+```
+
+可调环境变量：`TWIST2_AMP_WEIGHT`（0.3）、`TWIST2_AMP_LR`（3e-5）、`TWIST2_AMP_ACC_TARGET`（0.85）、`TWIST2_AMP_R1`（5.0）、`TWIST2_AMP_LABEL_SMOOTH`（0.1）、`TWIST2_AMP_EXPERT_MOTIONS`（200）、`TWIST2_AMP_EXPERT_HORIZON_S`（4.0）。
+
+监控：`Episode_Reward/amp_style`（应随跟踪变好而上升，健康时 >0.1）与 `Loss/amp_disc_acc`（健康区间约 0.6–0.85，不应到 1.0）。若 `amp_style` 长期贴 0，说明判别器又过强，可下调 `TWIST2_AMP_LR` 或下调 `TWIST2_AMP_ACC_TARGET`。
+
 ## 动作文件格式
 
 ### 原始 PKL 输入
@@ -630,6 +661,7 @@ motions:
 - `src/twist2_mjlab/rl_cfg.py` — 运行器与模型配置
 - `src/twist2_mjlab/rl/algorithm.py` — `Twist2PPO`：PPO + 可微闭环辅助目标（`L_aux`）
 - `src/twist2_mjlab/rl/world_model.py` — 可微特权动力学模型 `PrivilegedDynamicsModel`
+- `src/twist2_mjlab/rl/amp.py` — AMP 判别器、专家 buffer（按 control dt 采样）、共享归一化与更新逻辑
 
 ## 排查问题
 

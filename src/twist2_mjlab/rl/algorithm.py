@@ -482,6 +482,12 @@ class Twist2PPO(PPO):
     if aux_updates > 0:
       mean_aux_loss /= aux_updates
 
+    # AMP: update the discriminator from this rollout's policy transitions
+    # (reset-crossing transitions are masked inside ``AmpState.update``).
+    amp_stats: dict[str, float] = {}
+    if getattr(self, "amp", None) is not None:
+      amp_stats = self.amp.update(self.storage)
+
     self.storage.clear()
     self._update_count += 1
 
@@ -499,6 +505,7 @@ class Twist2PPO(PPO):
       loss_dict["aux_coef"] = self._current_aux_coef()
     if wm_loss is not None:
       loss_dict["world_model"] = wm_loss
+    loss_dict.update(amp_stats)
     return loss_dict
 
   def train_mode(self) -> None:
@@ -516,6 +523,14 @@ class Twist2PPO(PPO):
     if self.world_model is not None and self.wm_optimizer is not None:
       saved["world_model_state_dict"] = self.world_model.state_dict()
       saved["wm_optimizer_state_dict"] = self.wm_optimizer.state_dict()
+    amp = getattr(self, "amp", None)
+    if amp is not None:
+      saved["amp_disc_state_dict"] = amp.disc.state_dict()
+      saved["amp_normalizer_state"] = {
+        "mean": amp.normalizer.mean,
+        "var": amp.normalizer.var,
+        "count": amp.normalizer.count,
+      }
     return saved
 
   def load(self, loaded_dict: dict, load_cfg: dict | None, strict: bool) -> bool:
@@ -526,6 +541,14 @@ class Twist2PPO(PPO):
       )
       if self.wm_optimizer is not None and "wm_optimizer_state_dict" in loaded_dict:
         self.wm_optimizer.load_state_dict(loaded_dict["wm_optimizer_state_dict"])
+    amp = getattr(self, "amp", None)
+    if amp is not None and "amp_disc_state_dict" in loaded_dict:
+      amp.disc.load_state_dict(loaded_dict["amp_disc_state_dict"], strict=strict)
+      if "amp_normalizer_state" in loaded_dict:
+        state = loaded_dict["amp_normalizer_state"]
+        amp.normalizer.mean = state["mean"].to(self.device)
+        amp.normalizer.var = state["var"].to(self.device)
+        amp.normalizer.count = float(state["count"])
     return load_iteration
 
   @staticmethod

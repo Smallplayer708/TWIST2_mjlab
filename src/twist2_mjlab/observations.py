@@ -192,6 +192,22 @@ def imu_roll_pitch(env: ManagerBasedRlEnv) -> torch.Tensor:
 	return torch.stack((roll, pitch), dim=-1)
 
 
+def amp_style_state(
+	env: ManagerBasedRlEnv, command_name: str = "motion"
+) -> torch.Tensor:
+	"""Style feature for AMP: joint_pos(29) + joint_vel(29) + root_z(1).
+
+	Buffered for the discriminator only; never consumed by the actor/critic. The
+	expert counterpart is sampled from the motion library in ``rl/amp.py`` with
+	the same layout and the same control dt.
+	"""
+	command = get_motion_command(env, command_name)
+	root_z = command.robot_body_pos_w[:, 0, 2:3] - env.scene.env_origins[:, 2:3]
+	return torch.cat(
+		(command.robot_joint_pos, command.robot_joint_vel, root_z), dim=-1
+	)
+
+
 def critic_root_pos_w(
 	env: ManagerBasedRlEnv, command_name: str = "motion"
 ) -> torch.Tensor:
