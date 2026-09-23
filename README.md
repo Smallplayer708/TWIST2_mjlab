@@ -40,10 +40,15 @@ twist2_mjlab/
 │   ├── pretrained.onnx         # Pretrained ONNX model (for sim2sim)
 │   ├── pretrained_seed.pt      # Pretrained SEED checkpoint (30K iterations)
 │   ├── pretrained_seed.onnx    # Pretrained SEED ONNX model (for sim2sim)
-│   ├── pretrained_aux.onnx     # ONNX for the 30K differentiable-aux (world model) policy
+│   ├── pretrained_aux.onnx     # 30K differentiable-aux policy (tuned rewards)
+│   ├── aux_upstream_30k.onnx   # 30K differentiable-aux policy (upstream rewards)
+│   ├── amp_upstream_30k.onnx   # 30K improved-AMP policy (upstream rewards)
 │   ├── hello.gif               # README demo asset
 │   ├── example.gif             # README demo asset
 │   └── readme_zh.md            # Chinese usage guide
+├── bridge/                     # OrcaLab arm-teleop bridge (adapted to this repo's 1524-D policy)
+│   ├── bridge_twist2_to_orcalab.py
+│   └── BRIDGE_DEPLOY_AND_TWIN.md
 ├── deploy/                     # Sim2sim + real-hardware deployment
 │   ├── play_sim_twist2.sh      # Sim2sim orchestration (MuJoCo + policy)
 │   ├── play_real_twist2.sh     # Real-hardware orchestration (G1 + policy)
@@ -413,6 +418,45 @@ The tuning variables from the sim2sim section (`TWIST2_LEG_PD_GAIN`, `TWIST2_ARM
 - Always keep a hand on the wireless remote; **SELECT** is the fastest way out.
 - Start with the robot suspended or with a second person holding it. The first press of **A** hands control to the policy immediately.
 - On Ctrl-C the launcher's cleanup trap `pkill`s both nodes, and the hardware node damps at the current pose before exiting.
+
+## Available policies (policy zoo)
+
+`resources/` ships several ready-to-deploy ONNX policies. All of them take the same
+actor observation `[1, 1524]` and are used the exact same way — pick one:
+
+| ONNX | Training | Rewards | envs | Notes |
+|------|----------|---------|------|-------|
+| `pretrained.onnx` | plain PPO | upstream | 4096 | official baseline; best anchor / body_pos |
+| `pretrained_aux.onnx` | PPO + differentiable aux (world model) | tuned | 2048 | lowest joint / body tracking error, but the most jitter |
+| `aux_upstream_30k.onnx` | PPO + differentiable aux | upstream | 2048 | the **smoothest** (lowest action / joint-vel jitter) in the matched comparison |
+| `amp_upstream_30k.onnx` | PPO + improved AMP | upstream | 2048 | healthy discriminator (disc_acc≈0.87); tracking / jitter on par with the aux baseline |
+
+Numbers come from the same deterministic play-eval harness (256 envs, no DR).
+
+```bash
+# sim2sim
+TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl \
+  ./deploy/play_sim_twist2.sh resources/aux_upstream_30k.onnx
+
+# real-time teleop sim (Redis)
+./deploy/play_sim_twist2_redis.sh resources/aux_upstream_30k.onnx
+
+# real hardware
+TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl TWIST2_REAL_NET=eth0 \
+  ./deploy/play_real_twist2.sh resources/aux_upstream_30k.onnx
+
+# OrcaLab arm-teleop bridge
+python bridge/bridge_twist2_to_orcalab.py --policy resources/aux_upstream_30k.onnx --fix_feet
+```
+
+## OrcaLab bridge
+
+`bridge/` is a single-file TWIST2 → OrcaLab bridge: it reads the 35-D teleop mimic from
+Redis, runs one of the exported ONNX policies inside OrcaLab/MuJoCo and drives position
+actuators. It has been adapted to this repo's observation layout — `HISTORY_LEN=11`,
+`TOTAL_OBS_SIZE=127×12=1524`, and the original future-mimic block removed (upstream used
+`1432 = 127×11 + 35`). See `bridge/BRIDGE_DEPLOY_AND_TWIN.md` for dependencies, startup
+order, buttons and the B1 digital-twin mode.
 
 ## Motion file format
 

@@ -37,13 +37,18 @@ twist2_mjlab/
 ├── sim2sim_seed_pretrained.sh  # 使用 SEED 预训练 ONNX 的一键 sim2sim
 ├── resources/
 │   ├── pretrained.pt           # 预训练检查点（30K iterations）
-│   ├── pretrained.onnx         # 预训练 ONNX 模型（用于 sim2sim）
+│   ├── pretrained.onnx         # 预训练 ONNX（原版奖励，4096 envs）
 │   ├── pretrained_seed.pt      # SEED 预训练检查点（30K iterations）
 │   ├── pretrained_seed.onnx    # SEED 预训练 ONNX 模型（用于 sim2sim）
-│   ├── pretrained_aux.onnx     # 可微 aux（world model）策略 30K 的 ONNX（用于 sim2sim / 遥操作）
+│   ├── pretrained_aux.onnx     # aux（可微目标，tuned 奖励）30K ONNX
+│   ├── aux_upstream_30k.onnx   # aux + 原版奖励 30K ONNX
+│   ├── amp_upstream_30k.onnx   # AMP + 原版奖励 30K ONNX
 │   ├── hello.gif               # README 演示资源
 │   ├── example.gif             # README 演示资源
 │   └── readme_zh.md            # 中文使用说明
+├── bridge/                     # OrcaLab 双臂遥操作 bridge（已适配本仓库 1524 维策略）
+│   ├── bridge_twist2_to_orcalab.py
+│   └── BRIDGE_DEPLOY_AND_TWIN.md
 ├── deploy/                     # Sim2sim + 真机部署流水线
 │   ├── play_sim_twist2.sh      # Sim2sim 启动脚本（MuJoCo + policy）
 │   ├── play_real_twist2.sh     # 真机启动脚本（G1 + policy）
@@ -623,6 +628,153 @@ TWIST2_ENABLE_AUX=1 TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train
 
 `TWIST2_ENABLE_AMP=1` 启用一个改良版的 AMP，作为**纯训练期**的风格先验：不改变 actor/critic 输入，判别器/专家 buffer/`amp_style` 观测都只存在于训练侧，不进 ONNX。
 
+> **基线说明**：本仓库依赖的 mjlab pinned 版本（`60eca4af...`）**本身没有 AMP**；本仓库在 `5755bf4 "Rebuild AMP"` 之前也没有 AMP（`rl/runner.py` 只是保留 `registry_name` 的薄壳）。所以下面讲的是「当前 AMP 相对基础 mjlab PPO 跟踪器（无 AMP）」新增了什么，而不是相对某个旧 AMP 的改动。
+
+### 原理
+
+标准 AMP = 判别器 + 风格奖励：
+
+1. 训练判别器 `D(s, s')`（输入是相邻两帧 transition），专家样本来自参考动作库，策略样本来自当前策略 rollout。
+2. 判别器学会区分「像人（专家）」和「像策略」。
+3. 策略奖励加一项 `r_style = f(D(s,s'))`，鼓励策略产生判别器认为像专家的 transition。
+4. 判别器与策略交替优化。
+
+本实现的关键选择：**只做 reward shaping，不改策略梯度结构**。判别器有独立 Adam optimizer，策略只通过新增奖励项被间接影响；不引入额外 actor loss，也不改 actor/critic 维度，因此 ONNX 导出与部署完全不变。
+
+### 代码实现（逐个文件）
+
+| 文件 | 性质 | 作用 |
+|---|---|---|
+| `src/twist2_mjlab/rl/amp.py` | 新增 296 行 | 判别器、专家 buffer、共享归一化、判别器更新、acc 门控 |
+| `src/twist2_mjlab/rl/runner.py` | 修改 +11 | 构建 `AmpState`，挂到 env 与 algorithm |
+| `src/twist2_mjlab/rl/algorithm.py` | 修改 +23 | 每个 PPO iteration 更新判别器；checkpoint 存取 |
+| `src/twist2_mjlab/config.py` | 修改 +32 | `_AMP_ENABLED` 开关、`amp_style` 观测组、`amp_style` 奖励项 |
+| `src/twist2_mjlab/observations.py` | 修改 +16 | `amp_style_state()` 风格特征 |
+| `src/twist2_mjlab/rewards.py` | 修改 +33 | `amp_reward()` 风格奖励 |
+
+**1) `config.py` — 开关 / 观测组 / 奖励项**（全部 gated，关闭时配置逐位不变）
+
+```python
+# 顶部开关（config.py:48-57）
+_AMP_ENABLED = os.environ.get("TWIST2_ENABLE_AMP", "").strip().lower() in (
+  "1","true","yes","on",
+)
+_AMP_WEIGHT = float(os.environ.get("TWIST2_AMP_WEIGHT", "0.3"))
+
+# 奖励项（config.py:236-241）
+if _AMP_ENABLED:
+    rewards["amp_style"] = RewardTermCfg(
+      func=twist2_rewards.amp_reward, weight=_AMP_WEIGHT,
+      params={"command_name": "motion"},
+    )
+
+# 观测组（config.py:583-594）——buffer-only，不进 actor/critic
+if _AMP_ENABLED:
+    cfg.observations["amp_style"] = ObservationGroupCfg(
+      terms={"state": ObservationTermCfg(
+          func=twist2_obs.amp_style_state,
+          params={"command_name": "motion"})},
+      concatenate_terms=True, enable_corruption=False,
+    )
+```
+
+**2) `observations.py:195-208` — 风格特征**
+
+```python
+def amp_style_state(env, command_name="motion"):
+    command = get_motion_command(env, command_name)
+    root_z = command.robot_body_pos_w[:, 0, 2:3] - env.scene.env_origins[:, 2:3]
+    return torch.cat((command.robot_joint_pos, command.robot_joint_vel, root_z), dim=-1)
+```
+
+- `STYLE_DIM = 2*29 + 1 = 59`：`joint_pos(29) + joint_vel(29) + root_z(1)`。
+- `robot_joint_pos/vel`、`robot_body_pos_w` 是**机器人本体状态**（判别器里的 policy 侧）；专家侧用 motion library 的 `joint_pos/joint_vel/body_pos_w`。
+
+**3) `rewards.py:528-556` — 风格奖励**
+
+```python
+def amp_reward(env, command_name="motion"):
+    disc = getattr(env, "amp_discriminator", None)
+    normalizer = getattr(env, "amp_normalizer", None)
+    if disc is None or normalizer is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    from twist2_mjlab.rl.amp import REWARD_COEF
+    s_next = amp_style_state(env, command_name)
+    s_prev = getattr(env, "_prev_amp_obs", None)
+    if s_prev is None:
+        env._prev_amp_obs = s_next.detach()
+        return torch.zeros(env.num_envs, device=env.device)
+    with torch.no_grad():
+        logits = disc(normalizer.normalize(s_prev),
+                      normalizer.normalize(s_next)).squeeze(-1)
+    env._prev_amp_obs = s_next.detach()
+    return torch.clamp(1.0 - REWARD_COEF * (logits - 1.0).pow(2), min=0.0)
+```
+
+- `r = clamp(1 − 0.25·(D(s,s′) − 1)², 0)`：D 越接近 +1 奖励越高，clamp 到 0；只消费判别器、不训练（`no_grad`）。
+- transition 用 `env._prev_amp_obs`（上一步）与当前 `amp_style_state` 拼成。
+
+**4) `rl/amp.py` — 核心**
+
+常量（`amp.py:33-50`，全部可用 `TWIST2_AMP_*` 覆盖）：
+`DISC_LR=3e-5`、`DISC_HIDDEN=(512,256)`、`R1_COEF=5.0`、`DISC_LOGIT_REG=0.05`、`DISC_BATCH=2048`、`EXPERT_BATCH=2048`、`REWARD_COEF=0.25`、`EXPERT_NUM_MOTIONS=200`、`EXPERT_HORIZON_S=4.0`、`AMP_GRAD_CLIP=1.0`、`AMP_ACC_TARGET=0.85`、`DISC_LABEL_SMOOTH=0.1`。
+
+- `RunningMeanStd`（`62-87`）：增量式 running mean/var，**专家与策略共用**，白化后判别器无法靠分布整体偏移区分两者。
+- `AMPDiscriminator`（`90-105`）：输入 `2*59=118`，`Linear(118,512)→LeakyReLU(0.2)→Linear(512,256)→LeakyReLU(0.2)→Linear(256,1)`，输出标量 logits（LSGAN，不是概率）。
+- `build_expert_transitions`（`108-144`）：每个动作按 `step_dt` 取最多 `horizon_s/step_dt=200` 帧，`state = joint_pos + joint_vel + root_z`，再取相邻对 `s=all[:-1]`、`s'=all[1:]`。
+- `_disc_accuracy`（`147-160`）：`acc = 0.5·(P(D_e>0) + P(D_p<0))`。
+- `update_discriminator`（`163-211`）：
+
+```python
+normalizer.update(expert_s); normalizer.update(policy_s)   # 共享统计
+es, esn = normalize(expert); ps, psn = normalize(policy)
+es.requires_grad_(True); esn.requires_grad_(True)          # R1 需要输入梯度
+target_e = 1.0 - 0.1                                       # 标签平滑
+lsgan = 0.5*(logits_e - 0.9)^2.mean() + 0.5*(logits_p + 1)^2.mean()
+logit_reg = 0.05 * (logits_e^2.mean() + logits_p^2.mean())
+grads = autograd.grad(logits_e.sum(), (es, esn), create_graph=True)
+r1 = 0.5 * 5.0 * Σ mean(||∂D/∂s||²)                        # 只惩罚专家输入
+loss = lsgan + logit_reg + r1
+# Adam(lr=3e-5), clip_grad_norm_(disc, 1.0)
+```
+
+- `AmpState`（`214-283`）：持判别器/optimizer/共享 normalizer/专家 buffer；`update(storage)` 从 buffer 取 `amp_style[:-1]`/`[1:]`，用 `storage.dones[:-1] < 0.5` 丢掉跨 reset 的 transition，采样 2048 策略 + 2048 专家；**更新前先算 acc，`>0.85` 就跳过这一步**（仍返回 acc，等 acc 回落自动恢复）。
+
+**5) `rl/runner.py:31-40` — 接线**
+
+```python
+if amp_enabled():
+    raw_env = self.env.unwrapped
+    motion_lib = get_motion_command(raw_env, "motion").motion_lib
+    self.amp = AmpState(motion_lib, device, float(raw_env.step_dt))
+    raw_env.amp_discriminator = self.amp.disc      # 供 rewards.amp_reward
+    raw_env.amp_normalizer   = self.amp.normalizer
+    raw_env._prev_amp_obs    = None
+    self.alg.amp             = self.amp            # 供 Twist2PPO.update
+```
+
+`Twist2OnPolicyRunner` 由 `src/twist2_mjlab/__init__.py:14` 的 `runner_cls=` 注册进 `Twist2-Flat-Unitree-G1`。
+
+**6) `rl/algorithm.py:485-508` — PPO 更新钩子**
+
+```python
+amp_stats = {}
+if getattr(self, "amp", None) is not None:
+    amp_stats = self.amp.update(self.storage)   # 所有 PPO epoch 之后，clear 之前
+self.storage.clear()
+...
+loss_dict.update(amp_stats)  # amp_disc_loss / amp_r1 / amp_disc_acc
+```
+
+判别器**每个 PPO iteration 更新一次**（不是每个 minibatch）。checkpoint 侧（`523-552`）额外保存/恢复 `amp_disc_state_dict` 与 `amp_normalizer_state`（mean/var/count）；注意**不保存 Adam 动量**。
+
+### 一次训练迭代的数据流
+
+1. env 每步：`amp_style_state`（59D 机器人状态）写入 `storage.observations["amp_style"]`；同时 `amp_reward` 用 `_prev_amp_obs` 与当前状态算 `amp_style` 奖励（权重 0.3）进入 advantage。
+2. PPO 正常更新（value/surrogate/entropy，外加可选 aux/world model）。
+3. `Twist2PPO.update` 末尾调 `AmpState.update(storage)`：策略 transition（reset 掩码）+ 专家 buffer → 先 acc 门控，再 LSGAN+logit_reg+R1，Adam(3e-5) 走一步。
+4. `storage.clear()`，进入下一轮；判别器与 normalizer 随 checkpoint 存取。
+
 ### 相对早期实现修了什么
 
 早期集成里判别器必然坍塌（run `2026-09-10_11-41-16`：`AMP/disc_loss 9.6→0.002`、`AMP/grad_penalty→0.0001`、`Episode_Reward/amp_style≈0`，而 tracking 正常收敛）。原因与修法：
@@ -649,6 +801,54 @@ TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train_twist2.sh 0 \
 可调环境变量：`TWIST2_AMP_WEIGHT`（0.3）、`TWIST2_AMP_LR`（3e-5）、`TWIST2_AMP_ACC_TARGET`（0.85）、`TWIST2_AMP_R1`（5.0）、`TWIST2_AMP_LABEL_SMOOTH`（0.1）、`TWIST2_AMP_EXPERT_MOTIONS`（200）、`TWIST2_AMP_EXPERT_HORIZON_S`（4.0）。
 
 监控：`Episode_Reward/amp_style`（应随跟踪变好而上升，健康时 >0.1）与 `Loss/amp_disc_acc`（健康区间约 0.6–0.85，不应到 1.0）。若 `amp_style` 长期贴 0，说明判别器又过强，可下调 `TWIST2_AMP_LR` 或下调 `TWIST2_AMP_ACC_TARGET`。
+
+### 实现注意点
+
+- `amp.py` 顶部导出的 `AMP_WEIGHT` 实际未被引用；真正生效的是 `config.py` 独立读取的 `_AMP_WEIGHT`。两处读同一环境变量，改一处即可（别只改 `amp.py`）。
+- 专家 transition 在动作拼接处会跨界：`all_states[:-1]`/`[1:]` 使每个动作末帧与下一个动作首帧组成一条 transition（数据量大时影响很小，但并非严格同动作内相邻）。
+- 归一化统计只用 `s` 更新，`s'` 复用同一套统计量白化（同分布，通常无碍）。
+- 奖励侧 `env._prev_amp_obs` 不随 episode reset 清空，reset 后第一帧的 `(s_prev, s_next)` 会跨 episode；判别器训练侧则用 `dones` 掩码丢弃跨界项，两边处理不完全一致。
+- 专家 `root_z` 是世界系绝对高度，策略 `root_z` 相对 env origin；平地（origin z=0）一致，起伏地形会对不齐。
+- checkpoint 不保存判别器 Adam 动量与 `self.amp` 本身（`self.amp` 由 runner 重建，判别器权重与 normalizer 从 dict 恢复）。
+
+## 可用策略（策略库）与如何选择
+
+`resources/` 下内置了几个可直接部署的 ONNX。它们的 actor 观测都是 `[1, 1524]`、部署方式完全相同，**任选其一即可**：
+
+| ONNX | 训练方法 | 奖励配置 | envs | 特点 |
+|------|----------|----------|------|------|
+| `pretrained.onnx` | 原版 PPO | upstream | 4096 | 官方预训练基线；anchor / body_pos 最好 |
+| `pretrained_aux.onnx` | PPO + 可微 aux（world model） | tuned | 2048 | 关节 / 身体跟踪误差最低，但抖动也最大 |
+| `aux_upstream_30k.onnx` | PPO + 可微 aux | upstream | 2048 | 同奖励对照里**最平滑**（动作/关节速度抖动最小） |
+| `amp_upstream_30k.onnx` | PPO + 改进版 AMP | upstream | 2048 | 判别器健康（disc_acc≈0.87），跟踪/抖动与 aux 基线基本相当 |
+
+以上结论来自同 harness 的确定性 play-eval（256 envs、无 DR）；`amp` 的训练曲线里 `amp_style` 收敛到 ~0.12、`disc_acc` 稳定在 ~0.87（不再坍塌）。
+
+**如何选择并运行**（所有脚本都接受显式 ONNX 路径，或 `.pt` 检查点自动导出）：
+
+```bash
+# sim2sim（pkl 动作库）
+TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl \
+  ./deploy/play_sim_twist2.sh resources/aux_upstream_30k.onnx
+
+# 实时遥操作仿真（Redis）
+./deploy/play_sim_twist2_redis.sh resources/aux_upstream_30k.onnx
+
+# 真机
+TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl TWIST2_REAL_NET=eth0 \
+  ./deploy/play_real_twist2.sh resources/aux_upstream_30k.onnx
+
+# OrcaLab bridge（双臂遥操作仿真）
+python bridge/bridge_twist2_to_orcalab.py --policy resources/aux_upstream_30k.onnx --fix_feet
+```
+
+选型建议：要**最平滑** → `aux_upstream_30k.onnx`；要**最低跟踪误差**（但动作更激进、抖动更大）→ `pretrained_aux.onnx`；要**贴近官方基线** → `pretrained.onnx`。
+
+## OrcaLab Bridge（双臂遥操作仿真）
+
+`bridge/` 是 TWIST2 → OrcaLab 的 bridge（单文件，不依赖 OrcaManipulation 仓库）：从 Redis 读 teleop 的 35D mimic，在 OrcaLab/MuJoCo 里运行我们导出的 ONNX 策略并驱动 position 执行器。
+
+已适配本仓库策略：`HISTORY_LEN=11`、`TOTAL_OBS_SIZE=127×12=1524`，并移除了原版的 future-mimic 块（原版是 `1432 = 127×11 + 35`）。依赖、启动顺序、按键与 B1 数字孪生模式见 `bridge/BRIDGE_DEPLOY_AND_TWIN.md`。
 
 ## 动作文件格式
 
