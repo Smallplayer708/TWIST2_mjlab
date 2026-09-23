@@ -158,64 +158,44 @@ uv run python -m twist2_mjlab.scripts.seed_enrich \
 
 **注意:** 如果你想先直接体验一下，这个包已经自带了一个训练到 30K iterations 的预训练 checkpoint，直接运行 `play_twist2_pretrained.sh` 即可。
 
-### 3) 训练
+### 3) 策略库：选择与运行
 
-对于原始 TWIST2 动作，`TWIST2_MOTION_FILE` 可以指向单个补全后的 `.pkl`，也可以指向包含多个动作的 dataset `.yaml`：
+`resources/` 下内置了 5 个可直接部署的 ONNX。它们的 actor 观测都是 `[1, 1524]`、用法完全一致，**任选其一**：
 
-```bash
-TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train_twist2.sh 0
-```
+| ONNX | 训练方法 | 奖励配置 | envs | 特点 |
+|------|----------|----------|------|------|
+| `pretrained.onnx` | 原版 PPO | upstream | 4096 | 官方预训练基线；anchor / body_pos 最好 |
+| `pretrained_aux.onnx` | PPO + 可微 aux（world model） | tuned | 2048 | 关节 / 身体跟踪误差最低，但抖动最大 |
+| `aux_upstream_30k.onnx` | PPO + 可微 aux | upstream | 2048 | 同奖励对照里**最平滑**（动作 / 关节速度抖动最小） |
+| `amp_upstream_30k.onnx` | PPO + 改进版 AMP | upstream | 2048 | 判别器健康（disc_acc≈0.87），跟踪 / 抖动与 aux 基线基本相当 |
+| `pretrained_seed.onnx` | SEED 预训练 | — | — | SEED 数据集 |
 
-对于 SEED 流程，`train_seed.sh` 默认使用 `seed_enrich.py` 的输出：
+选型建议：要**最平滑**选 `aux_upstream_30k.onnx`；要**最低跟踪误差**（动作更激进、抖动更大）选 `pretrained_aux.onnx`；要**贴近官方基线**选 `pretrained.onnx`。
 
-```bash
-bash train_seed.sh 0
-```
-
-说明：
-
-- 第一个位置参数是 GPU 编号（默认是 `0`），
-- 额外的 CLI 参数会继续传递给 MJLab 的 `train` 命令，
-- `train_twist2.sh` 的训练日志会写入 `logs/rsl_rl/g1_twist2_flat/`，
-- `train_seed.sh` 的训练日志会写入 `logs/rsl_rl/g1_twist2_seed_flat/`。
-
-如果你修改了 SEED 输出目录，请同步更新 `train_seed.sh` 里的 `MOTION_FILE`，或者创建一个指向 `~/twist2/seed_g1_enriched_pkl/seed_dataset.yaml` 的软链接。
-
-如果你想同时使用 TWIST2 和 SEED，两条流程分别运行即可；它们使用不同的动作文件和日志目录，不会互相影响。
-
-#### 关于 W&B 以及保存内容
-
-这个包默认会把训练记录到 Weights & Biases。
-
-该任务的 W&B 默认值是：
-
-- project：`twist2_mjlab`
-- experiment name：`g1_twist2_flat`
-- run name：`g1_twist2_flat`
-
-首次运行前，请先完成 W&B 登录：
+**每个策略的运行指令**（把 `$ONNX` 换成上表里的文件名即可；脚本都支持直接传 `.pt` 自动导出）：
 
 ```bash
-wandb login
+ONNX=resources/aux_upstream_30k.onnx   # 可换 pretrained.onnx / pretrained_aux.onnx / amp_upstream_30k.onnx
+
+# ① 播放 / 可视化（本地 viewer）
+TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash play_twist2.sh "$ONNX"
+
+# ② Sim2sim（pkl 动作库，MuJoCo + 绿色影子）
+TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl bash deploy/play_sim_twist2.sh "$ONNX"
+
+# ③ 实时遥操作仿真（Redis，需要 teleop 发布端 → 见第 7 节）
+bash deploy/play_sim_twist2_redis.sh "$ONNX"
+
+# ④ 真机（固定动作片段）
+TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl TWIST2_REAL_NET=eth0 \
+  bash deploy/play_real_twist2.sh "$ONNX"
+
+# ⑤ OrcaLab bridge（全身遥操作；加 --fix_feet 则为锁腿双臂）
+python bridge/bridge_twist2_to_orcalab.py --policy "$ONNX"
+python bridge/bridge_twist2_to_orcalab.py --policy "$ONNX" --fix_feet   # 锁腿双臂模式
 ```
 
-如果你不想使用交互式登录，也可以直接设置 `WANDB_API_KEY`。
-
-默认情况下，W&B 会保存：
-
-- 训练标量，例如 episode 统计、loss、学习率、action 标准差，以及 FPS / 性能指标
-- 训练与环境配置（`agent.yaml` 和 `env.yaml`）
-- 本次运行所用本地仓库的 git 状态，包括 commit hash、status 和 diff
-- 在运行目录下找到的日志视频（`*.mp4`）
-- 当启用 `upload_model` 时，模型 checkpoint 和导出的 policy 文件；该选项默认开启
-
-如果你不想使用 W&B，可以在启动训练时将 logger 切换为 TensorBoard：
-
-```bash
-TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train_twist2.sh 0 --agent.logger tensorboard
-```
-
-如果你只想在环境层面禁用 W&B，也可以设置 `WANDB_MODE=disabled`。
+> 想最快看效果：`TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl bash deploy/play_sim_twist2.sh resources/aux_upstream_30k.onnx`
 
 ### 4) 播放 / 可视化
 
@@ -569,6 +549,97 @@ sim2sim 一节的调参环境变量（`TWIST2_LEG_PD_GAIN`、`TWIST2_ARM_PD_GAIN
 - 启动前请把机器人悬吊起来，或者由另一人扶住。按下 **A** 的瞬间控制权就交给 policy 了。
 - Ctrl-C 时启动脚本的清理钩子会 `pkill` 掉两个节点，硬件节点退出前会先在当前姿态阻尼保持。
 
+### 7) 遥操作与真机：PC / PICO / G1 与 TWIST2 teleop 端的分工
+
+完整遥操作链路由四部分组成：
+
+| 角色 | 跑在哪 | 职责 |
+|------|--------|------|
+| **PICO 手柄/头显** | 操作者 | 采集人手位姿，作为遥操作输入 |
+| **TWIST2 teleop 端（GMR 重定向）** | 与 PICO 同机（`gemr` conda 环境） | 把 PICO 数据重定向成 35D mimic，写入 Redis `action_body_unitree_g1_with_hands` |
+| **策略端（本仓库）** | PC / 笔记本 | 读 Redis 的 35D mimic → 1524D obs → ONNX → 29D 关节目标（UDP） |
+| **执行端** | 仿真（`sim_node`）或 G1 真机（`hardware_node`） | 接收 29D 目标，PD 控制到关节 |
+
+**PICO 端**：戴好头显/手柄、与 teleop 主机在同一网络；启动 TWIST2 teleop 前确认 PICO 已连接（见 TWIST2 仓库 `doc/TELEOP.md`）。
+
+**TWIST2 teleop 端**（原仓库）：
+```bash
+cd /path/to/TWIST2
+conda activate gemr
+bash teleop.sh            # 可选：--mode tuned / --mode fix_feet
+# 校验：redis-cli get action_body_unitree_g1_with_hands 的值应持续变化
+```
+
+**PC / 策略端**（本仓库）：从第 3 节选一个策略启动；遥操作时用 Redis 版：
+```bash
+bash deploy/play_sim_twist2_redis.sh resources/aux_upstream_30k.onnx          # 仿真
+# 真机：换成 redis 版 policy 节点 + hardware_node（协议相同，见 deploy/real/）
+```
+
+**G1 真机端**：PC 通过有线网络连 G1（默认 `eth0`），真机循环以 50 Hz 读 IMU/关节并下发 PD 目标；首次需安装 SDK2 绑定（见第 6 节）。手柄流程：**START** 起立 → **A** 进入 policy → **B** 退出 → **SELECT** 紧急阻尼停止。
+
+> 安全：`deploy/policy/twist2_policy_redis.py` 目前对 Redis 没有超时/失败兜底，也没有 payload 校验；真机遥操作前建议先补「Redis 超时保持上一帧 + 形状/NaN 校验」，并先悬吊或由人扶住。
+
+## 训练
+
+对于原始 TWIST2 动作，`TWIST2_MOTION_FILE` 可以指向单个补全后的 `.pkl`，也可以指向包含多个动作的 dataset `.yaml`：
+
+```bash
+TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train_twist2.sh 0
+```
+
+对于 SEED 流程，`train_seed.sh` 默认使用 `seed_enrich.py` 的输出：
+
+```bash
+bash train_seed.sh 0
+```
+
+说明：
+
+- 第一个位置参数是 GPU 编号（默认是 `0`），
+- 额外的 CLI 参数会继续传递给 MJLab 的 `train` 命令，
+- `train_twist2.sh` 的训练日志会写入 `logs/rsl_rl/g1_twist2_flat/`，
+- `train_seed.sh` 的训练日志会写入 `logs/rsl_rl/g1_twist2_seed_flat/`。
+
+如果你修改了 SEED 输出目录，请同步更新 `train_seed.sh` 里的 `MOTION_FILE`，或者创建一个指向 `~/twist2/seed_g1_enriched_pkl/seed_dataset.yaml` 的软链接。
+
+如果你想同时使用 TWIST2 和 SEED，两条流程分别运行即可；它们使用不同的动作文件和日志目录，不会互相影响。
+
+#### 关于 W&B 以及保存内容
+
+这个包默认会把训练记录到 Weights & Biases。
+
+该任务的 W&B 默认值是：
+
+- project：`twist2_mjlab`
+- experiment name：`g1_twist2_flat`
+- run name：`g1_twist2_flat`
+
+首次运行前，请先完成 W&B 登录：
+
+```bash
+wandb login
+```
+
+如果你不想使用交互式登录，也可以直接设置 `WANDB_API_KEY`。
+
+默认情况下，W&B 会保存：
+
+- 训练标量，例如 episode 统计、loss、学习率、action 标准差，以及 FPS / 性能指标
+- 训练与环境配置（`agent.yaml` 和 `env.yaml`）
+- 本次运行所用本地仓库的 git 状态，包括 commit hash、status 和 diff
+- 在运行目录下找到的日志视频（`*.mp4`）
+- 当启用 `upload_model` 时，模型 checkpoint 和导出的 policy 文件；该选项默认开启
+
+如果你不想使用 W&B，可以在启动训练时将 logger 切换为 TensorBoard：
+
+```bash
+TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train_twist2.sh 0 --agent.logger tensorboard
+```
+
+如果你只想在环境层面禁用 W&B，也可以设置 `WANDB_MODE=disabled`。
+
+
 ## 可微辅助目标（Differentiable Auxiliary Objective）
 
 本仓库在原有 PPO 训练之上新增了一个**可微的闭环辅助目标**。它**不改变策略网络结构，也不改变推理/部署链路**，只在训练时额外提供一条「动作 → 未来状态 → 未来跟踪误差」的梯度路径。
@@ -811,42 +882,11 @@ TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train_twist2.sh 0 \
 - 专家 `root_z` 是世界系绝对高度，策略 `root_z` 相对 env origin；平地（origin z=0）一致，起伏地形会对不齐。
 - checkpoint 不保存判别器 Adam 动量与 `self.amp` 本身（`self.amp` 由 runner 重建，判别器权重与 normalizer 从 dict 恢复）。
 
-## 可用策略（策略库）与如何选择
-
-`resources/` 下内置了几个可直接部署的 ONNX。它们的 actor 观测都是 `[1, 1524]`、部署方式完全相同，**任选其一即可**：
-
-| ONNX | 训练方法 | 奖励配置 | envs | 特点 |
-|------|----------|----------|------|------|
-| `pretrained.onnx` | 原版 PPO | upstream | 4096 | 官方预训练基线；anchor / body_pos 最好 |
-| `pretrained_aux.onnx` | PPO + 可微 aux（world model） | tuned | 2048 | 关节 / 身体跟踪误差最低，但抖动也最大 |
-| `aux_upstream_30k.onnx` | PPO + 可微 aux | upstream | 2048 | 同奖励对照里**最平滑**（动作/关节速度抖动最小） |
-| `amp_upstream_30k.onnx` | PPO + 改进版 AMP | upstream | 2048 | 判别器健康（disc_acc≈0.87），跟踪/抖动与 aux 基线基本相当 |
-
-以上结论来自同 harness 的确定性 play-eval（256 envs、无 DR）；`amp` 的训练曲线里 `amp_style` 收敛到 ~0.12、`disc_acc` 稳定在 ~0.87（不再坍塌）。
-
-**如何选择并运行**（所有脚本都接受显式 ONNX 路径，或 `.pt` 检查点自动导出）：
-
-```bash
-# sim2sim（pkl 动作库）
-TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl \
-  ./deploy/play_sim_twist2.sh resources/aux_upstream_30k.onnx
-
-# 实时遥操作仿真（Redis）
-./deploy/play_sim_twist2_redis.sh resources/aux_upstream_30k.onnx
-
-# 真机
-TWIST2_MOTION_FILE=/path/to/enriched/motion.pkl TWIST2_REAL_NET=eth0 \
-  ./deploy/play_real_twist2.sh resources/aux_upstream_30k.onnx
-
-# OrcaLab bridge（双臂遥操作仿真）
-python bridge/bridge_twist2_to_orcalab.py --policy resources/aux_upstream_30k.onnx --fix_feet
-```
-
-选型建议：要**最平滑** → `aux_upstream_30k.onnx`；要**最低跟踪误差**（但动作更激进、抖动更大）→ `pretrained_aux.onnx`；要**贴近官方基线** → `pretrained.onnx`。
-
-## OrcaLab Bridge（双臂遥操作仿真）
+## OrcaLab Bridge（遥操作仿真：全身 / 锁腿双臂）
 
 `bridge/` 是 TWIST2 → OrcaLab 的 bridge（单文件，不依赖 OrcaManipulation 仓库）：从 Redis 读 teleop 的 35D mimic，在 OrcaLab/MuJoCo 里运行我们导出的 ONNX 策略并驱动 position 执行器。
+
+**支持全身遥操作**：默认即**全身模式**——teleop 的 35D mimic 含 root 与 29 个关节，bridge 用它驱动全身（PICO/GMR 全身遥操作）。加 `--fix_feet` 才切换为 **锁腿双臂模式**：下肢焊接/锁住，只遥操作手臂，适合双臂采集或 arm-only 验证。
 
 已适配本仓库策略：`HISTORY_LEN=11`、`TOTAL_OBS_SIZE=127×12=1524`，并移除了原版的 future-mimic 块（原版是 `1432 = 127×11 + 35`）。依赖、启动顺序、按键与 B1 数字孪生模式见 `bridge/BRIDGE_DEPLOY_AND_TWIN.md`。
 

@@ -453,7 +453,9 @@ python bridge/bridge_twist2_to_orcalab.py --policy resources/aux_upstream_30k.on
 
 `bridge/` is a single-file TWIST2 → OrcaLab bridge: it reads the 35-D teleop mimic from
 Redis, runs one of the exported ONNX policies inside OrcaLab/MuJoCo and drives position
-actuators. It has been adapted to this repo's observation layout — `HISTORY_LEN=11`,
+actuators. It supports **full-body teleoperation by default** (the 35-D mimic carries the
+root and all 29 joints); add `--fix_feet` for the arm-only / locked-legs mode. It has been
+adapted to this repo's observation layout — `HISTORY_LEN=11`,
 `TOTAL_OBS_SIZE=127×12=1524`, and the original future-mimic block removed (upstream used
 `1432 = 127×11 + 35`). See `bridge/BRIDGE_DEPLOY_AND_TWIN.md` for dependencies, startup
 order, buttons and the B1 digital-twin mode.

@@ -27,7 +27,8 @@ teleop(GMR) → Redis action_body(35)+action_hand(7+7) → bridge: mimic+OrcaLab
 ```
 
 - 需要 `--policy`。
-- 适合：双臂采集、OrcaLab 侧遥操作验证。
+- **默认是全身模式**：teleop 的 35D mimic 含 root 与 29 个关节，bridge 直接驱动全身（PICO/GMR 全身遥操作）。
+- 加 `--fix_feet` 切换为**锁腿双臂模式**：下肢焊接/锁住，只遥操作手臂，适合双臂采集或用 OrcaLab 做 arm-only 验证。
 
 ### 1.3 观测契约与策略兼容（本仓库）
 
