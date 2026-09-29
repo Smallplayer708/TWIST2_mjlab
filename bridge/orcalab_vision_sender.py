@@ -114,7 +114,9 @@ def find_window_id(name_regex):
 
 
 def spawn_encoder(args, wid):
-    xwd_loop = (f'while true; do xwd -id {wid} -silent 2>/dev/null || break; '
+    # Retry xwd forever: a transient window loss (OrcaLab restart) must not
+    # kill the capture loop — frames just pause until the window reappears
+    xwd_loop = (f'while true; do xwd -id {wid} -silent 2>/dev/null; '
                 f'sleep {1.0 / args.fps:.3f}; done')
     xwd_proc = subprocess.Popen(["bash", "-c", xwd_loop], stdout=subprocess.PIPE)
     cmd = [
@@ -394,10 +396,6 @@ def main():
     ap.add_argument("--no-audio", action="store_true")
     args = ap.parse_args()
 
-    wid = find_window_id(args.window)
-    print(f"[Vision] capturing window {wid} ({args.window}) "
-          f"@ 2560x720 SBS, {args.fps}fps, {args.bitrate}")
-
     threading.Thread(target=control_server, args=(args.port,), daemon=True).start()
     threading.Thread(target=control_keepalive, daemon=True).start()
     threading.Thread(target=video_watchdog, daemon=True).start()
@@ -405,14 +403,28 @@ def main():
         threading.Thread(target=audio_server, args=(args.audio_port,),
                          daemon=True).start()
 
-    xwd_proc, enc = spawn_encoder(args, wid)
-    try:
-        au_pump(enc.stdout)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        enc.kill()
-        xwd_proc.kill()
+    # Encoder supervisor: au_pump returns when the encoder hits EOF (e.g.
+    # the captured window disappeared for good or ffmpeg died) — respawn
+    # with a freshly-resolved window id instead of letting the process die
+    while True:
+        try:
+            wid = find_window_id(args.window)
+        except SystemExit as e:
+            print(f"{e} — retrying")
+            time.sleep(5)
+            continue
+        print(f"[Vision] capturing window {wid} ({args.window}) "
+              f"@ 2560x720 SBS, {args.fps}fps, {args.bitrate}")
+        xwd_proc, enc = spawn_encoder(args, wid)
+        try:
+            au_pump(enc.stdout)
+            print("[Vision] encoder exited — respawning (window lost?)")
+        except KeyboardInterrupt:
+            break
+        finally:
+            enc.kill()
+            xwd_proc.kill()
+        time.sleep(1)
 
 
 if __name__ == "__main__":
