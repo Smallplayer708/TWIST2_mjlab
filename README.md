@@ -1,5 +1,7 @@
 # TWIST2 MJLab — Usage Guide
 
+**[中文使用说明（含 OrcaLab bridge 与 PICO 实时串流指南）](resources/readme_zh.md)**
+
 <div align="center">
     <img src="resources/hello.gif" alt="TWIST2 hello gif" width="360" />
   <img src="resources/real.gif" alt="TWIST2 hello in real world gif" width="360" />
@@ -47,7 +49,9 @@ twist2_mjlab/
 │   ├── example.gif             # README demo asset
 │   └── readme_zh.md            # Chinese usage guide
 ├── bridge/                     # OrcaLab arm-teleop bridge (adapted to this repo's 1524-D policy)
-│   ├── bridge_twist2_to_orcalab.py
+│   ├── bridge_twist2_to_orcalab.py  # bridge main (scene-XML patch chain)
+│   ├── orcalab_vision_sender.py # Remote Vision video sender (XRoboToolkit direct protocol, TCP :13579)
+│   ├── fbteleop.json           # OrcaLab layout (GUI uniformScale -> bridge physics sync)
 │   └── BRIDGE_DEPLOY_AND_TWIN.md
 ├── deploy/                     # Sim2sim + real-hardware deployment
 │   ├── play_sim_twist2.sh      # Sim2sim orchestration (MuJoCo + policy)

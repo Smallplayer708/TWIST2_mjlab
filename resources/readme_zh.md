@@ -46,8 +46,10 @@ twist2_mjlab/
 │   ├── hello.gif               # README 演示资源
 │   ├── example.gif             # README 演示资源
 │   └── readme_zh.md            # 中文使用说明
-├── bridge/                     # OrcaLab 双臂遥操作 bridge（已适配本仓库 1524 维策略）
-│   ├── bridge_twist2_to_orcalab.py
+├── bridge/                     # OrcaLab 全身遥操作 bridge（已适配本仓库 1524 维策略）
+│   ├── bridge_twist2_to_orcalab.py  # bridge 主程序（含场景 XML 补丁链）
+│   ├── orcalab_vision_sender.py # Remote Vision 视频发送端（XRoboToolkit 直连协议，TCP :13579）
+│   ├── fbteleop.json           # OrcaLab 布局文件（GUI 缩放 → 物理碰撞同步）
 │   └── BRIDGE_DEPLOY_AND_TWIN.md
 ├── deploy/                     # Sim2sim + 真机部署流水线
 │   ├── play_sim_twist2.sh      # Sim2sim 启动脚本（MuJoCo + policy）
@@ -75,14 +77,100 @@ twist2_mjlab/
 
 ## 快速开始
 
-### 1) 安装包
+### 1) 环境依赖与安装
 
-请在 `twist2_mjlab/` 目录下运行所有命令：
+整条链路涉及多个独立组件和环境，先给全景图，再逐个说明安装方式：
+
+```
+PICO 头显/手柄 ──XRoboToolkit客户端(APK)──> TWIST2 teleop端 ──35D mimic──> Redis <── bridge/策略节点
+                    (PICO 端)                (conda: gmr)                  (PC)      (conda: orcalab / uv: mjlab)
+                                                                                          │
+                                             OrcaLab 测试版(conda: orcalab-test) <──gRPC :50051──┘
+                                                      │
+                              XRoboToolkit Remote Vision(头显内) <──H.264 2560x720 SBS── orcalab_vision_sender(:13579) <── ffmpeg(conda: stream) <── xwd 抓 X11 窗口
+```
+
+#### 组件总览
+
+| 组件 | 作用 | 运行环境 | 所在机器 |
+|------|------|----------|----------|
+| **mjlab + uv** | 训练/播放/导出 ONNX（`Twist2-Flat-Unitree-G1`，mjwarp GPU 并行仿真） | 本仓库 `uv sync` 自动创建的 `.venv`（Python 3.10，CUDA） | PC（GPU） |
+| **TWIST2 teleop 端 + GMR** | 读 PICO 头/手位姿，经 GMR 运动重定向成 35D mimic 写入 Redis | [TWIST2 仓库](https://github.com/amazon-far/TWIST2)，conda 环境 `gmr` | 与 PICO 同网段的 PC |
+| **PICO XRoboToolkit 客户端** | 采集头显/手柄 6DoF 位姿，实时推流给 teleop 端（也承担 OrcaLab 的遥操作前台） | XRoboToolkit APK（侧载到 PICO） | PICO 头显 |
+| **Redis** | teleop ↔ bridge/策略节点之间的实时数据总线（`action_body_unitree_g1_with_hands`、`bridge_cmd` 等） | `redis-server` | PC |
+| **OrcaLab 测试版** | 遥操作仿真场景（GUI + gRPC 服务 :50051），bridge 的物理/渲染宿主 | conda 环境 `orcalab-test`（26.9.1+） | PC |
+| **bridge 环境** | 读 Redis mimic → ONNX 推理 → 驱动 OrcaLab/MuJoCo 位置执行器；含场景 XML 补丁 | conda 环境 `orcalab`（Python 3.12：`redis`、`onnxruntime`、`grpcio`、`mujoco`、`orca_gym`） | PC |
+| **串流组件** | OrcaLab 窗口画面 → 头显内 XRoboToolkit Remote Vision 直连观看 | conda 环境 `stream`（ffmpeg，含 `xwd_pipe` 定制解码器）+ `xwd`/`xwininfo`（x11-apps） | PC |
+| **Unitree SDK2 绑定**（可选） | G1 真机部署 | 见第 6 节 | PC + G1 |
+
+#### 1.1 本仓库（mjlab 训练环境）
 
 ```bash
 cd /path/to/twist2_mjlab
-uv sync
+uv sync          # 按 pyproject.toml 创建 .venv 并安装：mjlab、mjwarp(GPU MuJoCo)、
+                 # rsl_rl、torch(CUDA)、onnx/onnxruntime、numpy 等
 ```
+
+- Python 由 `pyproject.toml` 钉在 3.10（真机 SDK 预编译 binding 依赖此版本）
+- 训练需要 NVIDIA GPU；纯 sim2sim/bridge 用 `--device cpu` 即可
+
+#### 1.2 TWIST2 teleop 端（GMR 重定向）
+
+```bash
+git clone https://github.com/amazon-far/TWIST2.git   # 仓库内含 teleop.sh 与 deploy_real/
+conda create -n gmr python=3.10 -y && conda activate gmr
+# GMR（General Motion Retargeting）：PICO 头/手位姿 → 机器人全身关节的 IK 重定向
+pip install git+https://github.com/YanjieZe/GMR.git
+pip install mujoco redis loop-rate-limiters scipy opencv-python rich tqdm
+```
+
+- 启动入口是 TWIST2 仓库根目录的 `teleop.sh`（`--mode free` 全身 / `fix_feet` 锁腿 / `tuned` 全身+调参）
+- 依赖 Redis：先在本机装好并启动（见 1.3）；`teleop.sh` 里 `redis_ip` 默认 `localhost`
+- 本机参考：`~/TWIST2`，环境 `gmr` 装在 `~/miniconda3/envs/gmr`
+
+#### 1.3 Redis
+
+```bash
+sudo apt install redis-server && systemctl start redis-server   # 或 docker run -d -p 6379:6379 redis
+redis-cli ping   # PONG
+```
+
+#### 1.4 PICO 端：XRoboToolkit 客户端
+
+- 在 PICO 上侧载 **XRoboToolkit** APK（TWIST2 官方 release 附带），与 PC 同一局域网
+- 它是整条遥操作链路的数据源头：头显/手柄的 6DoF 位姿由它实时推流给 teleop 端；OrcaLab 遥操作时它同时是前台客户端（串流画面走它自带的 Remote Vision 通道，**不能抢占它的前台**）
+- 观看 OrcaLab 画面用 XRoboToolkit 自带的 **Remote Vision**（头显内直接显示，无需浏览器）
+- 具体连接/配对步骤见 TWIST2 仓库 `doc/TELEOP.md`
+
+#### 1.5 OrcaLab 测试版
+
+- 安装 OrcaLab **26.9.1+ 测试版**（含 gRPC 服务端，默认监听 :50051）
+- 本机参考：conda 环境 `orcalab-test`，启动命令
+  `QT_QPA_PLATFORM=xcb /home/user/miniconda3/envs/orcalab-test/bin/orcalab`
+- 注意 26.9+ 的 GUI 会持续下发 override ctrl，bridge 已用 `set_protected_override_ctrl_ids` 屏蔽（26.5 无此接口）
+
+#### 1.6 bridge 环境（独立于训练环境）
+
+```bash
+conda create -n orcalab python=3.12 -y && conda activate orcalab
+pip install redis onnxruntime grpcio mujoco numpy
+pip install orca_gym        # OrcaLab 配套的 gRPC 客户端库（随 OrcaLab 发行/源码安装）
+```
+
+- 必须用该环境跑 bridge：训练环境的 torch/mjlab 与 bridge 无关，bridge 只要 onnxruntime
+- 本机参考：`/home/user/VLN/.conda/envs/orcalab`
+
+#### 1.7 串流组件（可选，看画面用）
+
+```bash
+# ffmpeg（需 libx264；xwd_pipe 解码器为定制构建，普通 ffmpeg 不带）
+conda create -n stream ffmpeg -y
+# xwd 窗口采集工具
+sudo apt install x11-apps
+```
+
+- 不再需要 go2rtc / adb / 自签证书（早期浏览器串流方案已弃用）
+- 详细串流用法见下方「PICO 实时串流」一节
 
 ### 2) 准备动作数据
 
@@ -580,6 +668,60 @@ bash deploy/play_sim_twist2_redis.sh resources/aux_upstream_30k.onnx          # 
 
 > 安全：`deploy/policy/twist2_policy_redis.py` 目前对 Redis 没有超时/失败兜底，也没有 payload 校验；真机遥操作前建议先补「Redis 超时保持上一帧 + 形状/NaN 校验」，并先悬吊或由人扶住。
 
+### 8) 我们对官方 TWIST2 / GMR 的 teleop 改动（官方版迁移指南）
+
+直接跑官方 [TWIST2](https://github.com/amazon-far/TWIST2) + 官方 [GMR](https://github.com/YanjieZe/GMR) 也能基础遥操作，但存在腿抖、转向滞后、原地漂移等问题。以下是我们在此基础上做的全部改动，供在新机器上对着官方代码手动迁移。
+
+#### 8.1 GMR 仓库改动（2 个文件，约 52 行）
+
+**`general_motion_retargeting/xrobot_utils.py` —— 新增 `facing_yaw()`**
+
+```python
+def facing_yaw(headset7, synth_rh, prev_yaw=None):
+    """从 PICO 头显四元数算操作者面朝方向 yaw（rad）"""
+```
+
+- 头显原始前向（Unity 系 +z）经固定旋转阵映射到 GMR 右手系，投影到水平面求 yaw
+- 用骨架左右判别朝向：左腕在骨盆"机器人左侧"→ 机器人面对操作者，否则再加 π
+- 消歧与防抖：左腕落在身体中线 ±0.04m 内（抱臂/双手在胸前）时符号判定是噪声，保持上一帧 yaw；任何 >90° 的单帧跳变直接拒绝；相邻帧只向新 yaw 走半步平滑
+
+**`general_motion_retargeting/motion_retarget.py` —— `retarget()` 加可选参数**
+
+```python
+def retarget(self, human_data, offset_to_ground=False, root_yaw=None):
+    ...
+    if root_yaw is not None:
+        self.configuration.data.qpos[3:7] = np.array(
+            [np.cos(root_yaw/2), 0.0, 0.0, np.sin(root_yaw/2)])   # (w,x,y,z)
+```
+
+在增量 IK 求解**之前**直接把 root 四元数设为目标 yaw，使机器人 +x 始终 1:1 跟随操作者朝向，消除增量 IK 的 yaw 滞后。不传 `root_yaw` 时行为与上游完全一致（向后兼容）。
+
+#### 8.2 TWIST2 `deploy_real/xrobot_teleop_to_robot_w_hand.py`（约 350 行）
+
+按功能分六块，`mimic_obs` 的 35D 布局是：`[0:2]` root vx/vy、`[2]` vz、`[3:5]` roll/pitch 速度、`[5]` yaw 角速度、`[6:18]` 12 个腿关节、`[18:35]` 腰+双臂。
+
+| 功能 | 参数 | 说明 |
+|------|------|------|
+| **新增 `OneEuroFilter` 类** | — | 向量化 1€ 自适应低通（Casiez 2012）：静止段强滤波、运动段低延迟 |
+| **root 朝向对齐** | — | `process_retargeting` 接收 `headset_data`，调 GMR 的 `facing_yaw()` 得 root_yaw，传给 `retarget(root_yaw=...)`（依赖 8.1 的两处 GMR 改动） |
+| **腿部参考平滑** | `--smooth_mode one_euro\|ema`、`--one_euro_min_cutoff`、`--one_euro_beta`、`--leg_smooth_alpha` | 只作用于 `mimic_obs[0:18]`（root + 腿），手臂保持原始值不引延迟；one_euro 推荐，ema 是旧版回退 |
+| **静止死区** | `--vxvy_deadband 0.03`、`--yaw_vel_deadband 0.08` | PICO/SLAM 漂移 + 差分噪声让静止时 vx/vy/yaw_vel 有微小非零参考，EMA 滤不掉直流分量，策略会当成持续漂移指令执行 → 低于阈值直接置零 |
+| **增益补偿** | `--yaw_gain`（约 1.0~1.67）、`--xy_gain`（约 2.0~4.0） | MuJoCo 软接触下策略实际只执行参考的 ~0.6 倍 yaw 角速度和 ~0.2 倍平移速度（表现为"原地踏步"），对参考预放大做补偿 |
+| **锁腿/锁臂** | `--fixed_lower_body`、`--fixed_arm left\|right\|both`、`--arm_smooth_alpha` | 下半身锁到站立姿态常量（root z=0.8，腿/腰固定角），只遥操作手臂；固定臂覆盖为举手位 |
+
+其他小改动：`--retarget_damping`（透传给 GMR IK 的 LM 阻尼）、`--hand_step`（手开合步长改为可配）、新增 `publish_compare_state()`（把 qpos/足端位置发到 Redis `compare_teleop_state` 供对比工具用）、移除了 `teleop_state` 键的写入。
+
+#### 8.3 TWIST2 `teleop.sh` / `sim2sim.sh` —— 模式化封装
+
+`teleop.sh` 加了 `--mode` 参数组（free=上游原行为 / fix_feet=传 `--fixed_lower_body` / tuned=预置一组平滑参数），文件头有全参数中文速查注释。
+
+`sim2sim.sh` 同样加 `--mode`：`tuned` = 策略降到 50Hz + `--leg_pd_gain 1.0` + `--leg_ema_alpha 0.6`（治腿抖/跟踪差，配合 `server_low_level_g1_sim.py` 里 `--leg_pd_gain`/`--leg_ema_alpha` 的实现）；`fix_feet` = 焊接 pelvis + `--arm_pd_gain 2.5`。注意脚本要用 `gmr` 环境跑（Python 3.10 能装 mujoco 3.11，官方的 twist2 环境是 3.8 装不上）。
+
+`deploy_real/server_low_level_g1_real.py`、`robot_control/g1_wrapper.py` 有配套的调参改动，`legged_gym/.../g1_mimic_future_config.py` 无实质变化。详细的根因分析与方案取舍见 TWIST2 仓库内 `doc/LEG_TRACKING_IMPROVEMENTS.md`。
+
+> 迁移顺序建议：先打 8.1 的 GMR 两个补丁（否则 teleop 脚本 import `facing_yaw` 会失败），再改 8.2 的 teleop 脚本，最后按需抄 8.3 的 shell 封装。OrcaLab bridge 只依赖 Redis 里的 35D `action_body_unitree_g1_with_hands`，与这些改动解耦。
+
 ## 训练
 
 对于原始 TWIST2 动作，`TWIST2_MOTION_FILE` 可以指向单个补全后的 `.pkl`，也可以指向包含多个动作的 dataset `.yaml`：
@@ -889,6 +1031,97 @@ TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train_twist2.sh 0 \
 **支持全身遥操作**：默认即**全身模式**——teleop 的 35D mimic 含 root 与 29 个关节，bridge 用它驱动全身（PICO/GMR 全身遥操作）。加 `--fix_feet` 才切换为 **锁腿双臂模式**：下肢焊接/锁住，只遥操作手臂，适合双臂采集或 arm-only 验证。
 
 已适配本仓库策略：`HISTORY_LEN=11`、`TOTAL_OBS_SIZE=127×12=1524`，并移除了原版的 future-mimic 块（原版是 `1432 = 127×11 + 35`）。依赖、启动顺序、按键与 B1 数字孪生模式见 `bridge/BRIDGE_DEPLOY_AND_TWIN.md`。
+
+### 典型启动命令（测试版 OrcaLab，全身、无手模型）
+
+```bash
+# 1) teleop（先启动，bridge 依赖其 Redis 数据流）
+bash teleop.sh
+
+# 2) OrcaLab 测试版（无仿真启动，之后用 B 键激活 bridge 仿真）
+QT_QPA_PLATFORM=xcb /home/user/miniconda3/envs/orcalab-test/bin/orcalab
+
+# 3) bridge（--layout 现在有默认值，不传也会自动加载 bridge/fbteleop.json）
+python bridge/bridge_twist2_to_orcalab.py \
+  --policy resources/aux_upstream_30k.onnx --device cpu
+```
+
+启动日志中确认以下补丁生效（缺一项就说明该补丁没跑上）：
+
+```
+[Bridge] No --layout given, auto-applying default: .../fbteleop.json
+[Bridge] Fixed 2 broken inertial element(s) (zero diaginertia) → recomputed from actor geoms
+[Bridge] Layout scale x0.5699 applied to 24 geom(s) of actor 'yellow_metal_double_handle_pot_1' (prefix '[2741906742798]_geom')
+[Bridge] Studio ctrl overrides disabled for all N actuators (OrcaLab 26.9+ fix)
+; converted N torque motors → position servos
+```
+
+### 场景 XML 补丁链（加载时自动应用）
+
+OrcaLab 的 gRPC 场景 XML 导出存在几个缺陷，bridge 在加载模型时按顺序修补：
+
+| 补丁 | 解决的问题 |
+|------|-----------|
+| `_fix_broken_inertials` | 部分导出 actor 带 `mass="0.2" diaginertia="0 0 0"` 的坏惯量（geom 在嵌套子 body 上），MuJoCo 无法为零惯量自由体解算接触力 → 物体互相穿模、沉地。按 actor 自身 geom 重算质量/惯量并原地重写。**通用机制**，任何带坏惯量的物体都自动修复 |
+| `_apply_layout_box_scale` | GUI 里的 uniformScale 缩放**不会被烘焙**进导出 XML → 物理碰撞体比视觉大 N 倍，物体视觉/物理错位、悬空或初始穿模。读取布局 JSON，对每个 `uniformScale ≠ 1` 的 actor 匹配其碰撞 geom（两种命名规则：`{actor}__geom` 直接前缀，或 asset_path 尾段 token → `[GUID]_geom`），把 size/pos 乘上缩放。**换新资产同样适用**：GUI 里缩放并保存布局 → 重启 bridge 即自动生效；匹配失败会在日志打 WARNING |
+| `_inject_finger_armature` | 14 个手指关节注入 `armature=0.005`，防止原生 kp=1.5 伺服数值发散 |
+| `_inject_xml_weld_text` | `--fix_feet` 时焊接 pelvis（锁腿模式） |
+| `_inject_hand_grasp_patch` | 手抓取补丁（kp/kv + 螺丝刀摩擦） |
+
+### 执行器与控制适配
+
+- `_resolve_actuators`：执行器名匹配支持去掉 `_joint` 后缀的回退（g1_29dof_old 的执行器名无 `_joint` 后缀）
+- `_resolve_hand_actuators`：手部执行器缺失时捕获 `KeyError` 降级为 **body-only 模式**（自动关闭手部遥操作），无手模型也能跑全身
+- `_override_pd_gains`：`<motor>` 执行器（`biastype=NONE`，MuJoCo 会忽略 biasprm、把 ctrl 当原始力矩）自动转换为**位置伺服**（`biastype=AFFINE`，力 = kp·(ctrl−qpos) − kv·qvel），与训练控制模型一致
+- `set_protected_override_ctrl_ids`：OrcaLab 26.9+ 的 GUI 会持续下发自己的 override ctrl，与 bridge 的 ctrl 交错导致机器人乱动/失控；把全部执行器标记为 protected 后只有 bridge 驱动 ctrl
+
+### 布局同步流程（重要）
+
+1. 在 OrcaLab GUI 中调整物体的缩放/位置
+2. **保存布局**到 `bridge/fbteleop.json`（gRPC 导出不烘焙缩放，全靠这个文件）
+3. 重启 bridge（现在会自动读取）
+4. 看启动日志确认每个缩放过的 actor 都有 `Layout scale ... applied to N geom(s)` 行
+
+## PICO 实时串流（XRoboToolkit Remote Vision）
+
+OrcaLab 桌面窗口实时串流进头显，走 XRoboToolkit 官方 **Remote Vision** 直连协议。这与 TWIST2 实机 G1 的 ZED MINI 相机回传是同一套协议（TWIST2 仓库 `doc/TELEOP.md` 里的 `docker_zed.sh` 跑的官方 OrinVideoSender 就干这事），本仓库用 Python 等价实现，把视频源从 ZED 相机换成 OrcaLab 窗口采集：
+
+```
+xwd 抓 X11 窗口 → ffmpeg 编码(H.264 baseline, 2560x720 SBS, 15fps)
+        │
+        ├─ TCP :13579 控制通道：等待头显 Remote Vision 发来 OPEN_CAMERA
+        └─ 收到后主动回连头显 :12345，推送 H.264 裸流
+```
+
+### 启动发送端
+
+```bash
+conda activate stream   # 或任意带 ffmpeg + libx264 的环境
+python bridge/orcalab_vision_sender.py --window orca --fps 15
+```
+
+- `--window orca`：采集的 X11 窗口名（按 OrcaLab 窗口标题匹配）；其他参数见 `--help`（`--port 13579`、`--audio-port 13580`、`--bitrate 4M`、`--no-audio` 等）
+- 发送端监听 TCP :13579（控制通道）与 :13580（静音音频），等待头显连接，头显连接时才推流
+
+### PICO 端连接步骤
+
+1. 打开 XRoboToolkit → **Remote Vision** 面板
+2. Video Source 选 **ZEDMINI**（协议里 camera 字段必须为 `ZED`，选 VR/其他会被发送端拒绝）
+3. 点 **Listen** → 输入 PC 的 IP（如 `192.168.120.56`）→ **Confirm**
+4. 头显显示 `sending open_camera command` 后，发送端日志出现 `headset control channel connected: ...`，随后头显内出图
+
+### 协议与实现要点（调试用）
+
+- 控制通道帧格式：`[4B 大端 bodyLen][NetworkDataProtocol: 4B 小端 cmdLen][cmd][4B 小端 dataLen][data]`；5 秒空闲超时，需周期发 PING 保活（脚本已内置）
+- OPEN_CAMERA 携带 CameraRequestData（魔数 0xCAFE + 分辨率/fps/码率/port + camera 名 + 头显回连地址），config 里显示的头显 IP:12345 是头显自己等流的地址，属正常协议行为
+- 视频硬性要求：**2560x720 SBS**（头显解码器按 ZEDMINI 配置写死分辨率初始化，无视流的 SPS）、H.264 **baseline** profile、4:2:0、参数集（SPS/PPS）并入后续 IDR 帧发送、**剥离 AUD NAL**——参数集空包或 AUD 会导致头显 JNI global reference 溢出闪退
+- 音频：:13580 持续发 16kHz 单声道静音 PCM（Remote Vision 会同时拉音频，不发会报错）
+
+### 已知限制
+
+- **右 B 键冲突**：Remote Vision 模式下右手 B 被固定为切双屏（APK 内置行为），bridge 默认的启动键（右 B）会被占用 → 启动 bridge 时加 `--start_button RightController.axis_click` 换成右摇杆按下；录制/刷新等其余键位可用 `--record_button` / `--reset_button` / `--replay_button` 调整
+- 串流的是 2D 窗口光栅，画面内容不跟随头动（OrcaLab 渲染相机不变）
+- Remote Vision 会话期间 XRoboToolkit 保持前台，与浏览器/WebXR 互斥
 
 ## 动作文件格式
 
