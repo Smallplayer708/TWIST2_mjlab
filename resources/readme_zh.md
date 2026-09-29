@@ -1122,6 +1122,27 @@ python bridge/orcalab_vision_sender.py --window orca --fps 15
 - **按键分配**（Remote Vision 模式下右手 B 被 APK 固定为切双屏，故启动键默认放在左摇杆）：**左摇杆按下 = 启动/暂停**，左 B = 刷新场景，右 B = 录制，右摇杆按下 = 回放；可用 `--start_button` / `--reset_button` / `--record_button` / `--replay_button` 覆盖。注意回放会直接进入 TELEOP 驱动旧录制帧（机器人会摔倒），回放完按左 B 刷新场景
 - 串流的是 2D 窗口光栅，画面内容不跟随头动（OrcaLab 渲染相机不变）
 - Remote Vision 会话期间 XRoboToolkit 保持前台，与浏览器/WebXR 互斥
+- 另有一个未解决的 bug，见下节
+
+### 已知 bug：XRoboToolkit 应用自动退出（未解决，待排查）
+
+**现象**：Remote Vision 串流正常出图后，头显端整个 XRoboToolkit 应用在约 15~30 秒后自动退出（无固定周期），sender 日志表现为控制通道 `Connection reset by peer` + `video connection lost`。重新 Listen 可复现，每次都会崩。
+
+**已排查结论**（2026-09-29 调试记录，避免重复走弯路）：
+
+- 发送端协议无问题：同一进程曾连续推流 2000+ AU 并正常出图；控制帧格式、2560x720 SBS、baseline、PING 保活均与官方 OrinVideoSender 行为一致
+- PC Service 日志（`~/.local/share/PICOBusinessSuitData/log/`）在应用退出瞬间记录 `"TestDevice" remove tcp` / `rtc device offline`——这是应用死亡的结果，不是原因（该日志一整天都有大量普通重连的同款记录）
+- 头显端 Java 库（BRobotAssistantLib）**没有** PING/PONG 逻辑，"未回 PONG" 已排除
+- 崩溃无固定周期（实测 15s 和 30s 各出现过），排除固定看门狗超时类的客户端逻辑
+- APK v1.1.1 为 IL2CPP 编译的 Unity 应用（逻辑在 `libil2cpp.so`），静态反编译定位困难
+- 历史教训：早前把 H.264 二进制灌进控制协议通道会导致 JNI global reference 溢出闪退（已修复，与本 bug 无关，但现象类似）
+
+**后续调试建议**：
+
+1. **抓 logcat（最直接）**：PICO 打开开发者模式 → USB 调试（无线 adb 会失效需重开），PC 上 `adb connect <PICO-IP>:5555 && adb logcat`，在崩溃瞬间找 `FATAL` / `SIGSEGV` / `SIGABRT` / `JNI` / `lowmemorykiller` 关键字，确定是解码器崩溃、JNI 溢出还是被系统杀
+2. **每帧泄漏验证**：用 `--fps 5` 启动 sender，若应用存活时间按帧数比例延长（约 3 倍），说明头显端解码器每帧泄漏资源（应用 bug，发送端无法根治，只能降帧率续命）
+3. **对照官方链路**：TWIST2 实机走官方 OrinVideoSender + ZED 相机（`doc/TELEOP.md` 的 `docker_zed.sh`）。若官方链路同样崩则是 APK bug；若官方不崩，对比两者码流差异（帧率 60 vs 15、SPS/PPS 频率、AU 尺寸分布）
+4. 发送端可靠性已加固（看门狗 + 断连自动清理 + OrcaLab 重启自动恢复），崩溃后重新 Listen 即可，无需重启 sender
 
 ## 动作文件格式
 

@@ -464,6 +464,20 @@ adapted to this repo's observation layout — `HISTORY_LEN=11`,
 `1432 = 127×11 + 35`). See `bridge/BRIDGE_DEPLOY_AND_TWIN.md` for dependencies, startup
 order, buttons and the B1 digital-twin mode.
 
+For watching the OrcaLab window inside the headset, `bridge/orcalab_vision_sender.py`
+implements the XRoboToolkit **Remote Vision** direct protocol (the same one TWIST2's
+`docker_zed.sh` / OrinVideoSender uses for the ZED camera): the headset connects to
+TCP :13579, sends `OPEN_CAMERA`, and the sender pushes a 2560x720 SBS H.264 capture of
+the OrcaLab window back to the headset. See the Chinese guide for setup details.
+
+> **Known bug (open)**: with Remote Vision active, the XRoboToolkit app on the PICO
+> exits by itself ~15–30 s into the stream (variable period). The sender side has been
+> ruled out (protocol verified against the official sender, 2000+ AU sessions streamed
+> fine); the crash is inside the v1.1.1 APK (IL2CPP) and needs headset-side logcat to
+> diagnose. Recover by re-tapping Listen — the sender survives (watchdog + auto
+> respawn on OrcaLab restarts). Full debugging notes: `resources/readme_zh.md`,
+> section 「已知 bug：XRoboToolkit 应用自动退出」.
+
 ## Motion file format
 
 ### Raw PKL input
