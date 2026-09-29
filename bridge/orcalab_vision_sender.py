@@ -183,6 +183,8 @@ control_conns = []      # headset OperatorControlClient sockets
 video_sock = None       # our connection to the headset MediaDecoder server
 last_keyframe = None    # most recent AU containing SPS (for instant start)
 frames_sent = 0
+last_au_seen = 0.0      # watchdog: last time an AU arrived from the encoder
+last_send_ok = 0.0      # watchdog: last time a video send completed
 
 
 def set_video(sock):
@@ -198,27 +200,32 @@ def set_video(sock):
 
 def push_au(au):
     """Send one access unit to the headset video socket (if connected)."""
-    global frames_sent, last_keyframe
+    global frames_sent, last_keyframe, last_au_seen, last_send_ok
     pkt = struct.pack(">I", len(au)) + au
+    last_au_seen = time.time()
     with state_lock:
         if _nal_type(re.split(b"(?=\x00\x00\x01)", au)[0]) == 7 or \
            b"\x00\x00\x00\x01\x67" in au[:64] or b"\x00\x00\x01\x67" in au[:64]:
             last_keyframe = au
         s = video_sock
-        if not s:
-            return
+    if not s:
+        return
+    # Send OUTSIDE state_lock: sendall to a vanished headset can block for
+    # minutes (TCP retransmit) — holding the lock here used to freeze the
+    # accept loop and keepalive (headset Wi-Fi drop → sender appears dead).
+    try:
+        s.sendall(pkt)
+        frames_sent += 1
+        last_send_ok = time.time()
+        if frames_sent % (15 * 5) == 0:
+            print(f"[Vision] sent {frames_sent} AUs")
+    except OSError:
+        print("[Vision] video connection lost")
         try:
-            s.sendall(pkt)
-            frames_sent += 1
-            if frames_sent % (15 * 5) == 0:
-                print(f"[Vision] sent {frames_sent} AUs")
+            s.close()
         except OSError:
-            print("[Vision] video connection lost")
-            try:
-                s.close()
-            except OSError:
-                pass
-            set_video(None)
+            pass
+        set_video(None)
 
 
 def au_pump(enc_stdout):
@@ -232,6 +239,9 @@ def video_pusher(ip, port, req):
     try:
         s = socket.create_connection((ip, port), timeout=5)
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # 5s send timeout: a headset that vanished mid-stream must fail fast
+        # instead of blocking sendall for the full TCP retransmit window
+        s.settimeout(5)
         print(f"[Vision] streaming to headset {ip}:{port} "
               f"({req['width']}x{req['height']}@{req['fps']} wanted)")
         set_video(s)
@@ -295,18 +305,48 @@ def control_keepalive():
         time.sleep(2)
         with state_lock:
             conns, control_conns[:] = control_conns[:], []
-            dead = []
-            for c in conns:
-                try:
-                    c.sendall(ping)
-                    control_conns.append(c)
-                except OSError:
-                    dead.append(c)
+        dead = []
+        for c in conns:
+            try:
+                c.sendall(ping)  # outside the lock (same wedge risk as video)
+                control_conns.append(c)
+            except OSError:
+                dead.append(c)
+        with state_lock:
+            control_conns.extend(c for c in conns if c not in dead)
         for c in dead:
             try:
                 c.close()
             except OSError:
                 pass
+
+
+def video_watchdog(stall_sec=10.0):
+    """Force-close a stalled video socket so the sender never wedges.
+
+    Trigger: encoder AUs keep arriving but no send completes for
+    `stall_sec` seconds — the headset vanished mid-send (Wi-Fi drop) and a
+    sendall is stuck in TCP retransmit. Closing the socket makes the blocked
+    sendall fail immediately; without this the sender used to freeze until
+    the retransmit window expired (~15 min) with new headset connections
+    piling up unaccepted.
+    """
+    while True:
+        time.sleep(3)
+        if time.time() - last_au_seen > stall_sec:
+            continue  # encoder idle — not a send stall
+        with state_lock:
+            s = video_sock
+        if not s:
+            continue
+        if time.time() - last_send_ok > stall_sec:
+            print(f"[Vision] WATCHDOG: no video progress for {stall_sec:.0f}s "
+                  "while encoder is live — closing stalled socket")
+            try:
+                s.close()  # unblocks any sendall stuck on this socket
+            except OSError:
+                pass
+            set_video(None)
 
 
 def control_server(port):
@@ -360,6 +400,7 @@ def main():
 
     threading.Thread(target=control_server, args=(args.port,), daemon=True).start()
     threading.Thread(target=control_keepalive, daemon=True).start()
+    threading.Thread(target=video_watchdog, daemon=True).start()
     if not args.no_audio:
         threading.Thread(target=audio_server, args=(args.audio_port,),
                          daemon=True).start()
