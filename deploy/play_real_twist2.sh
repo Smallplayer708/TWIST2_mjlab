@@ -16,6 +16,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "${SCRIPT_DIR}")"
 CLEANED_UP=0
 
+# uv venv lives outside the project (sandbox cannot write <root>/.venv)
+export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-/home/user/.local/share/twist2_mjlab/venv}"
+
 cleanup() {
   if [[ "${CLEANED_UP}" == "1" ]]; then
     return

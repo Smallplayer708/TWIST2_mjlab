@@ -218,35 +218,118 @@ def load_onnx_policy(policy_path, device="cuda"):
 # =============================================================================
 # TWIST2 Constants (mirrors server_low_level_g1_sim.py:122-128)
 # =============================================================================
-DEFAULT_DOF_POS = np.array([
-    -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,     # left leg (6)
-    -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,     # right leg (6)
-     0.0, 0.0, 0.0,                       # torso (3)
-     0.0, 0.4, 0.0, 1.2, 0.0, 0.0, 0.0,  # left arm (7)
-     0.0, -0.4, 0.0, 1.2, 0.0, 0.0, 0.0, # right arm (7)
-], dtype=np.float32)
-
 ANKLE_IDX = [4, 5, 10, 11]
-ACTION_SCALE = 0.5
 
-# TWIST2 训练/部署 PD 增益（stiffness/damping，与 DEFAULT_DOF_POS 同序：
-# 腿6+腿6+腰3+左臂7+右臂7，来源 deploy_real/server_low_level_g1_sim.py）。
-# OrcaLab XML position 执行器增益（肩肘 kp≈14、腕 kp≈14-17）与训练值
-# （肩肘 kp=40/kv=5、腕 kp=4.0/kv=0.2）不匹配 → 双臂到位后极限环振荡。
-TWIST2_STIFFNESS = np.array([
-    100, 100, 100, 150, 40, 40,
-    100, 100, 100, 150, 40, 40,
-    150, 150, 150,
-    40, 40, 40, 40, 4.0, 4.0, 4.0,
-    40, 40, 40, 40, 4.0, 4.0, 4.0,
-], dtype=np.float32)
-TWIST2_DAMPING = np.array([
-    2, 2, 2, 4, 2, 2,
-    2, 2, 2, 4, 2, 2,
-    4, 4, 4,
-    5, 5, 5, 5, 0.2, 0.2, 0.2,
-    5, 5, 5, 5, 0.2, 0.2, 0.2,
-], dtype=np.float32)
+# ─────────────────────────────────────────────────────────────────────────────
+# 参数组（--params 选择）。两套常量都必须与「训练该策略的仓库」逐位一致：
+#   - default_dof_pos : 默认站姿（29，TWIST2_JOINT_NAMES 顺序）
+#   - action_scale    : 每关节动作缩放（29）→ pd_target = action*scale + default
+#   - stiffness/damping: 29 个本体 position 执行器的 kp/kd
+#   - policy_hz       : 策略/控制频率（决定 obs 历史的时间跨度）
+#
+# "mjlab"   — 本仓库 (TWIST2_mjlab) 训练的 1524 维策略必须用这套。
+#             来源（已与 deploy/policy/twist2_policy.py 运行时解析结果逐位核对）：
+#             站姿 = mjlab KNEES_BENT_KEYFRAME；缩放 = mjlab G1_ACTION_SCALE；
+#             kp/kd = mjlab g1_constants（NATURAL_FREQ=10Hz, DAMPING_RATIO=2.0：
+#             5020 kp14.25/kd0.91、7520_14 kp40.2/kd2.56、7520_22 kp99.1/kd6.31、
+#             4010 kp16.78/kd1.07、腰踝 4 连杆 2×5020 kp28.5/kd1.81）。
+#             之前 bridge 沿用 twist2 套装导致 OrcaLab 侧乱动：
+#             默认站姿差 0.6 rad（elbow）、手腕缩放放大 6.7×、踝 kp 差 2.5×。
+# "twist2"  — 原版 TWIST2 (amazon-far/TWIST2) 的训练常量，保留用于对比/回退。
+# ─────────────────────────────────────────────────────────────────────────────
+PARAM_SETS = {
+    "mjlab": {
+        "default_dof_pos": [
+            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,   # left leg (6)
+            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,   # right leg (6)
+             0.0, 0.0, 0.0,                          # waist (3)
+             0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0,      # left arm (7)
+             0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0,     # right arm (7)
+        ],
+        "action_scale": [
+            0.548, 0.351, 0.548, 0.351, 0.439, 0.439,
+            0.548, 0.351, 0.548, 0.351, 0.439, 0.439,
+            0.548, 0.439, 0.439,
+            0.439, 0.439, 0.439, 0.439, 0.439, 0.075, 0.075,
+            0.439, 0.439, 0.439, 0.439, 0.439, 0.075, 0.075,
+        ],
+        "stiffness": [
+            40.2, 99.1, 40.2, 99.1, 28.5, 28.5,
+            40.2, 99.1, 40.2, 99.1, 28.5, 28.5,
+            40.2, 28.5, 28.5,
+            14.25, 14.25, 14.25, 14.25, 14.25, 16.78, 16.78,
+            14.25, 14.25, 14.25, 14.25, 14.25, 16.78, 16.78,
+        ],
+        "damping": [
+            2.56, 6.31, 2.56, 6.31, 1.81, 1.81,
+            2.56, 6.31, 2.56, 6.31, 1.81, 1.81,
+            2.56, 1.81, 1.81,
+            0.91, 0.91, 0.91, 0.91, 0.91, 1.07, 1.07,
+            0.91, 0.91, 0.91, 0.91, 0.91, 1.07, 1.07,
+        ],
+        "policy_hz": 50.0,   # mjlab 训练 50Hz 控制（sim 1000Hz × decimation 20）
+        "default_mimic_root_z": 0.76,  # mjlab DEFAULT_HEIGHT
+    },
+    "twist2": {
+        "default_dof_pos": [
+            -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,     # left leg (6)
+            -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,     # right leg (6)
+             0.0, 0.0, 0.0,                       # torso (3)
+             0.0, 0.4, 0.0, 1.2, 0.0, 0.0, 0.0,  # left arm (7)
+             0.0, -0.4, 0.0, 1.2, 0.0, 0.0, 0.0, # right arm (7)
+        ],
+        "action_scale": [0.5] * 29,
+        "stiffness": [
+            100, 100, 100, 150, 40, 40,
+            100, 100, 100, 150, 40, 40,
+            150, 150, 150,
+            40, 40, 40, 40, 4.0, 4.0, 4.0,
+            40, 40, 40, 40, 4.0, 4.0, 4.0,
+        ],
+        "damping": [
+            2, 2, 2, 4, 2, 2,
+            2, 2, 2, 4, 2, 2,
+            4, 4, 4,
+            5, 5, 5, 5, 0.2, 0.2, 0.2,
+            5, 5, 5, 5, 0.2, 0.2, 0.2,
+        ],
+        "policy_hz": 100.0,  # 原版 bridge 的 2 拍策略节奏
+        "default_mimic_root_z": 0.8,
+    },
+}
+
+# 活动参数组（apply_param_set() 重绑定；策略/观测代码引用这些全局名）
+PARAM_SET_NAME = None
+DEFAULT_DOF_POS = None
+ACTION_SCALE = None            # 现在是 29 维数组（逐关节缩放）
+TWIST2_STIFFNESS = None        # 名字保留，数值随参数组切换
+TWIST2_DAMPING = None
+DEFAULT_MIMIC_OBS = None
+POLICY_HZ = None
+
+
+def apply_param_set(name):
+    """切换参数组并重绑全局常量（DEFAULT_MIMIC_OBS 等派生量一并重算）。"""
+    global PARAM_SET_NAME, DEFAULT_DOF_POS, ACTION_SCALE, TWIST2_STIFFNESS
+    global TWIST2_DAMPING, DEFAULT_MIMIC_OBS, POLICY_HZ
+    if name not in PARAM_SETS:
+        raise ValueError(f"Unknown param set '{name}' (available: {list(PARAM_SETS)})")
+    p = PARAM_SETS[name]
+    PARAM_SET_NAME = name
+    DEFAULT_DOF_POS = np.array(p["default_dof_pos"], dtype=np.float32)
+    ACTION_SCALE = np.array(p["action_scale"], dtype=np.float32)
+    TWIST2_STIFFNESS = np.array(p["stiffness"], dtype=np.float32)
+    TWIST2_DAMPING = np.array(p["damping"], dtype=np.float32)
+    POLICY_HZ = float(p["policy_hz"])
+    DEFAULT_MIMIC_OBS = np.concatenate([
+        np.array([0.0, 0.0, p["default_mimic_root_z"], 0.0, 0.0, 0.0],
+                 dtype=np.float32),
+        DEFAULT_DOF_POS,
+    ]).astype(np.float32)
+    print(f"[Bridge] Param set '{name}': policy {POLICY_HZ:.0f}Hz | "
+          f"knee={DEFAULT_DOF_POS[3]:.3f} elbow={DEFAULT_DOF_POS[18]:.3f} | "
+          f"scale hip={ACTION_SCALE[0]:.3f} wrist_pitch={ACTION_SCALE[20]:.3f} | "
+          f"kp hip={TWIST2_STIFFNESS[0]:.1f} ankle={TWIST2_STIFFNESS[4]:.1f}")
 
 # Real-robot downlink PD gains (deploy_real/robot_control/configs/g1.yaml kps/kds),
 # same joint order. The real controller pushes kp/kd to the motor's internal loop
@@ -270,10 +353,7 @@ REAL_DAMPING = np.array([
 # Default 35-dim mimic obs (mirrors TWIST2 data_utils/params.py DEFAULT_MIMIC_OBS_G1):
 #   [0:2] xy vel, [2] z pos, [3:5] roll/pitch, [5] yaw ang vel, [6:35] = 29 dof
 # Arms live at mimic idx 21-34 (left 21-27, right 28-34).
-DEFAULT_MIMIC_OBS = np.concatenate([
-    np.array([0.0, 0.0, 0.8, 0.0, 0.0, 0.0], dtype=np.float32),
-    DEFAULT_DOF_POS,
-]).astype(np.float32)
+# NOTE: DEFAULT_MIMIC_OBS 由 apply_param_set() 按所选参数组构建（见上文）。
 HISTORY_LEN = 11        # mjlab actor_history keeps 11 frames *including* current
 N_MIMIC_OBS = 35
 N_OBS_SINGLE = 127      # 35 (mimic) + 92 (proprio)
@@ -500,6 +580,150 @@ _SCREWDRIVER_BODY_RE = re.compile(
 _FRICTION_02_RE = re.compile(r'friction="0\.2\d*\s+0\.005\d*\s+0\.0001\d*"')
 _FRICTION_1_REPL = 'friction="1.000000000 0.005000000 0.000100000"'
 
+# Finger numeric-stability fix: the hand asset defines finger hinges with
+# armature=0, damping=0 and ~1e-5 kg*m^2 link inertia. The position servos
+# (kv=0.1) integrated explicitly at dt=0.001 violate the damping stability
+# bound kv*dt < 2*I (1e-4 > 2.6e-5), so any finger motion diverges within
+# milliseconds → QACC NaN at a hand DOF → MuJoCo auto-resets data → repeat.
+# Visually the robot "flickers" uncontrollably (zero pose ↔ explosion loop).
+# Adding a small armature (motor rotor inertia) raises the effective inertia
+# without changing the steady-state servo behavior — the standard MuJoCo fix.
+_FINGER_ARMATURE = 0.005
+_FINGER_JOINT_RE = re.compile(
+    r'<joint\b[^>]*name="[^"]*_hand_(?:thumb|middle|index)_[0-9]+_joint"[^>]*?(/?)>'
+)
+
+
+def _fix_broken_inertials(xml_text):
+    """Fix <inertial> elements with zero diaginertia (physically invalid).
+
+    Some OrcaLab actor exports emit
+        <body name="ACTOR_base"><inertial mass="0.2" diaginertia="0 0 0"/>...
+    with the collision geoms sitting on nested child bodies. MuJoCo cannot
+    resolve contacts for zero-inertia free bodies (objects sink through them
+    under load), and simply deleting the element yields mass 0 (no geoms on
+    the base body). Instead we recompute mass/inertia from the actor's own
+    geoms (density=1000 in these exports) and rewrite the element in place,
+    keeping its pos.
+    """
+    broken_pat = re.compile(r'<inertial\b([^>]*?)/>')
+    attr_pat = re.compile(r'\b(name|pos|mass|diaginertia)="([^"]*)"')
+    geom_pat = re.compile(r'<geom\b[^>]*?/>')
+    geom_attr_pat = re.compile(r'\b(name|type|size|density)="([^"]*)"')
+
+    zero_diag = re.compile(
+        r'^\s*0(?:\.0*)?\s+0(?:\.0*)?\s+0(?:\.0*)?\s*$')
+
+    def _geom_props(tag):
+        props = dict(geom_attr_pat.findall(tag))
+        if "size" not in props:
+            return None
+        try:
+            s = [float(v) for v in props["size"].split()]
+        except ValueError:
+            return None
+        rho = float(props.get("density", 1000))
+        t = props.get("type", "box")
+        if t == "box" and len(s) == 3:
+            vol, dims = 8 * s[0] * s[1] * s[2], (2 * s[0], 2 * s[1], 2 * s[2])
+        elif t == "sphere" and len(s) >= 1:
+            vol, dims = 4 / 3 * np.pi * s[0] ** 3, (2 * s[0],) * 3
+        elif t == "ellipsoid" and len(s) == 3:
+            vol, dims = 4 / 3 * np.pi * s[0] * s[1] * s[2], (2 * s[0], 2 * s[1], 2 * s[2])
+        elif t == "cylinder" and len(s) == 2:
+            vol, dims = 2 * np.pi * s[0] ** 2 * s[1], (2 * s[0], 2 * s[0], 2 * s[1])
+        else:
+            return None
+        return rho * vol, dims
+
+    # 预扫描: 所有 geom 的质量/尺寸, 按名字前缀分组 (geom 名以 actor 前缀开头)
+    prefix_best = {}  # prefix -> (mass, dims) 取体积最大的 geom
+    for g in geom_pat.finditer(xml_text):
+        nm = re.search(r'\bname="([^"]*)"', g.group(0))
+        props = _geom_props(g.group(0))
+        if not nm or not props:
+            continue
+        name = nm.group(1)
+        if "__geom" not in name and "_geom_" not in name:
+            continue
+        prefix = re.split(r'_?_?geom', name, maxsplit=1)[0].rstrip("_")
+        if prefix not in prefix_best or props[0] > prefix_best[prefix][0]:
+            prefix_best[prefix] = props
+
+    n_fixed = 0
+
+    def _fix(m):
+        nonlocal n_fixed
+        attrs = dict(attr_pat.findall(m.group(1)))
+        if "diaginertia" not in attrs or not zero_diag.match(attrs["diaginertia"]):
+            return m.group(0)
+        # 所属 body 名 (向前找最近的 <body ... name="X_base">)
+        head = xml_text[:m.start()]
+        bm = re.findall(r'<body\b[^>]*\bname="([^"]*)"', head)
+        if not bm:
+            return m.group(0)
+        body_name = bm[-1]
+        prefix = body_name[:-5] if body_name.endswith("_base") else body_name
+        best = None
+        for p, props in prefix_best.items():
+            if p == prefix or p.startswith(prefix) or prefix.startswith(p):
+                if best is None or props[0] > best[0]:
+                    best = props
+        if best is None:
+            return m.group(0)
+        mass, dims = best
+        a, b, c = dims
+        inertia = (mass / 12 * (b * b + c * c),
+                   mass / 12 * (a * a + c * c),
+                   mass / 12 * (a * a + b * b))
+        pos = attrs.get("pos", "0 0 0")
+        n_fixed += 1
+        return (f'<inertial pos="{pos}" mass="{mass:.6f}" '
+                f'diaginertia="{inertia[0]:.8f} {inertia[1]:.8f} {inertia[2]:.8f}" '
+                f'quat="1 0 0 0"/>')
+
+    xml_text = broken_pat.sub(_fix, xml_text)
+    if n_fixed:
+        print(f"[Bridge] Fixed {n_fixed} broken inertial element(s) "
+              f"(zero diaginertia) → recomputed from actor geoms")
+    return xml_text
+
+
+def _inject_finger_armature(xml_text, armature=_FINGER_ARMATURE):
+    """Set armature on the 14 finger hinge joints (numerical stabilization).
+
+    Applied unconditionally at load time (independent of --no_hand_grasp:
+    the native kp=1.5 servos are just as unstable). Idempotent.
+    """
+    n = 0
+
+    def _repl(m):
+        nonlocal n
+        tag = m.group(0)
+        new = re.sub(r'armature="[^"]*"', f'armature="{armature}"', tag)
+        if new != tag:
+            n += 1
+            return new
+        # attribute absent → append before the closing bracket
+        closing = "/>" if tag.endswith("/>") else ">"
+        n += 1
+        return tag[: -len(closing)] + f' armature="{armature}"' + closing
+
+    patched = _FINGER_JOINT_RE.sub(_repl, xml_text)
+    if n:
+        print(f"[Finger Fix] set armature={armature} on {n} finger joints "
+              f"(dt=0.001 + kv=0.1 on ~1e-5 inertia is numerically unstable)")
+    else:
+        dump = "/tmp/bridge_xml_nomatch.xml"
+        try:
+            with open(dump, "w") as f:
+                f.write(xml_text)
+            print(f"[Finger Fix] WARNING: no finger joints matched — XML format changed? "
+                  f"text saved to {dump} ({len(xml_text)} bytes)")
+        except OSError:
+            print("[Finger Fix] WARNING: no finger joints matched — XML format changed?")
+    return patched
+
 
 def _inject_hand_grasp_patch(xml_text):
     """Strengthen finger position servos (kp/kv) and fix screwdriver grip friction.
@@ -580,17 +804,27 @@ class Twist2OrcaLabBridge:
         # low-pass on leg PD targets (0=off). Defaults keep prior behavior.
         leg_pd_gain=1.0,
         leg_ema_alpha=0.0,
+        # 策略/控制频率（Hz）。None = 用当前参数组的 POLICY_HZ。
+        # 必须匹配训练控制频率：mjlab 50Hz / 原版 TWIST2 bridge 100Hz。
+        policy_hz=None,
         # B1 twin: replay the real robot's policy target instead of running the
         # ONNX policy locally. See module docstring.
         replay_target=False,
         replay_gains="real",
         target_key="action_low_level_unitree_g1_with_hands",
         target_ts_key="t_action_low_level",
+        # OrcaLab layout JSON (e.g. fbteleop.json). The gRPC XML export does NOT
+        # bake GUI uniformScale edits into box geom sizes, so bridge physics
+        # keeps the original (oversized) collision. When provided, box geoms
+        # are rescaled to match each actor's uniformScale at load time.
+        layout_path=None,
     ):
         self.fix_feet = fix_feet
+        self.layout_path = layout_path
         self.pd_override = pd_override
         self.leg_pd_gain = leg_pd_gain
         self.leg_ema_alpha = leg_ema_alpha
+        self.policy_hz = float(policy_hz) if policy_hz is not None else POLICY_HZ
         self.replay_target = replay_target
         self.replay_gains = replay_gains
         self.target_key = target_key
@@ -677,14 +911,33 @@ class Twist2OrcaLabBridge:
         # no weld), the loader is patched, then init_env() re-loads (2nd load) with
         # welds (+ hand grasp patch). Hand grasp patch is applied whenever enabled,
         # independently of --fix_feet.
-        if self.fix_feet or self.hand_grasp:
-            self._wrap_xml_loader_with_patch()
+        # Loader patch is always installed: _inject_finger_armature must run
+        # unconditionally (finger servos are numerically unstable otherwise).
+        self._wrap_xml_loader_with_patch()
 
         # ── Local mode: render fails without gRPC ──
         if self.local_mode and not self.enable_render:
             self.env.unwrapped.render = lambda: None
 
         self.env.init_env()
+
+        # ── OrcaLab 26.9+: block Studio-side ctrl overrides ──
+        # In gRPC mode every render() sends qpos to Studio via update_local_env()
+        # and the RESPONSE carries Studio's own override_ctrls, which orca_gym
+        # caches and re-applies inside set_ctrl() on top of our ctrl. The new
+        # OrcaLab GUI populates overrides continuously (its idle servo / UI
+        # manipulation), so policy ctrl and Studio ctrl interleave → robot
+        # flickers and cannot be controlled once teleop starts. Old OrcaLab only
+        # sent overrides on manual dragging, which is why this worked before.
+        # set_protected_override_ctrl_ids() is the sanctioned fix (new in 26.9;
+        # absent in 26.5, hence the hasattr guard): mark ALL actuators protected
+        # so only the bridge drives ctrl.
+        _gym = getattr(self.env.unwrapped, "gym", None)
+        if _gym is not None and hasattr(_gym, "set_protected_override_ctrl_ids"):
+            _gym.set_protected_override_ctrl_ids(range(self.env.unwrapped.model.nu))
+            _gym.clear_override_ctrls()
+            print(f"[Bridge] Studio ctrl overrides disabled for all "
+                  f"{self.env.unwrapped.model.nu} actuators (OrcaLab 26.9+ fix)")
         print(f"[Bridge] Scene ready. nu={self.env.model.nu} nq={self.env.model.nq} nv={self.env.model.nv}")
 
         # Auto-detect robot agent name from model joints (robust to different robot assets)
@@ -698,21 +951,22 @@ class Twist2OrcaLabBridge:
             except OSError:
                 pass
 
-        # Set robot to standing pose (TWIST2 DEFAULT_DOF_POS)
+        # Set robot to standing pose (active param set's DEFAULT_DOF_POS)
         self._init_robot_pose()
         self._resolve_actuators()
         self._override_pd_gains()
+        self._resolve_hand_actuators()  # sets has_hands, must run before _resolve_joint_offsets
         self._resolve_joint_offsets()
-        self._resolve_hand_actuators()
 
         # OrcaLab hand poses (open/close 14 each) + last raw hand pose for
         # graceful degradation in _read_hand_poses
         self.hand_open_orca, self.hand_close_orca = _load_orca_hand_poses()
         self._last_hand_raw = np.zeros(14, dtype=np.float32)
         self._validate_hand_poses()
-        print(f"[Bridge] OrcaLab hand poses: open=zeros(14) "
-              f"L close={np.round(self.hand_close_orca[:7], 3).tolist()} "
-              f"R close={np.round(self.hand_close_orca[7:], 3).tolist()}")
+        if self.has_hands:
+            print(f"[Bridge] OrcaLab hand poses: open=zeros(14) "
+                  f"L close={np.round(self.hand_close_orca[:7], 3).tolist()} "
+                  f"R close={np.round(self.hand_close_orca[7:], 3).tolist()}")
 
         # Build lower body lock and apply immediately
         if self.fix_feet:
@@ -727,16 +981,18 @@ class Twist2OrcaLabBridge:
         self.last_action = np.zeros(29, dtype=np.float32)
         self.step_count = 0
 
-        # ── Time-driven policy beat (~100Hz, aligned with sim2sim sim_decimation=10) ──
+        # ── Time-driven policy beat (训练控制频率，由参数组 policy_hz 决定) ──
         # Loop iterates at 1/(time_step*frame_skip) Hz; run policy every N iterations
         # even when mimic is unchanged, so proprio feedback keeps driving the arms.
         self.policy_interval = max(
             1,
-            int(round(1000.0 / (self.time_step_val * 1000.0 * self.frame_skip) / 100.0)),
+            int(round(1000.0 / (self.time_step_val * 1000.0 * self.frame_skip)
+                      / self.policy_hz)),
         )
         loop_hz = 1000.0 / (self.time_step_val * 1000.0 * self.frame_skip)
         print(f"[Bridge] Policy beat: every {self.policy_interval} loop iterations "
-              f"(loop ~{loop_hz:.0f}Hz → policy ~{loop_hz / self.policy_interval:.0f}Hz)")
+              f"(loop ~{loop_hz:.0f}Hz → policy ~{loop_hz / self.policy_interval:.0f}Hz, "
+              f"target {self.policy_hz:.0f}Hz)")
 
         # ── Diagnostics state (--verbose) ──
         # Initialized to standing pose so the leg EMA starts from the correct target.
@@ -751,6 +1007,30 @@ class Twist2OrcaLabBridge:
         self._selftest_press_times = [0.5, 2.5, 3.5]
         self._selftest_press_idx = 0
         self._selftest_duration = 5.0
+
+    def _dump_model(self):
+        """Diagnostics: print the full joint / actuator / equality layout of the
+        loaded (patched) model. Used to map MuJoCo warning DOF indices to named
+        joints and to audit the scene composition."""
+        import mujoco as _mj
+        m = self.env.gym._mjModel
+        print(f"[Dump] nq={m.nq} nv={m.nv} nu={m.nu} nbody={m.nbody} neq={m.neq}")
+        print("[Dump] -- joints (id | type | qposadr | dofadr | name) --")
+        tnames = {v: k for k, v in vars(_mj.mjtJoint).items() if k.startswith("mjJNT_")}
+        for j in range(m.njnt):
+            name = _mj.mj_id2name(m, _mj.mjtObj.mjOBJ_JOINT, j)
+            print(f"  j{j:3d} | {tnames.get(int(m.jnt_type[j]), '?'):8s} | "
+                  f"qposadr={m.jnt_qposadr[j]:3d} | dofadr={m.jnt_dofadr[j]:3d} | {name}")
+        print("[Dump] -- actuators (id | kp | kv | name -> joint) --")
+        for a in range(m.nu):
+            name = _mj.mj_id2name(m, _mj.mjtObj.mjOBJ_ACTUATOR, a)
+            jid = m.actuator_trnid[a, 0]
+            jname = _mj.mj_id2name(m, _mj.mjtObj.mjOBJ_JOINT, jid)
+            print(f"  a{a:3d} | kp={m.actuator_gainprm[a,0]:7.3f} kv={-m.actuator_biasprm[a,2]:6.3f} | {name} -> {jname}")
+        print("[Dump] -- equality constraints --")
+        for e in range(m.neq):
+            print(f"  eq{e}: type={int(m.eq_type[e])} obj1={_mj.mj_id2name(m, _mj.mjtObj.mjOBJ_BODY, m.eq_obj1id[e])} "
+                  f"obj2={_mj.mj_id2name(m, _mj.mjtObj.mjOBJ_BODY, m.eq_obj2id[e])}")
 
     def _wrap_xml_loader_with_patch(self):
         """Patch env.gym.load_model_xml to inject XML edits at load time.
@@ -771,10 +1051,14 @@ class Twist2OrcaLabBridge:
                 xml = f.read()
 
             patched = xml
+            patched = _fix_broken_inertials(patched)
+            patched = _inject_finger_armature(patched)
             if self.fix_feet:
                 patched = _inject_xml_weld_text(patched)
             if self.hand_grasp:
                 patched = _inject_hand_grasp_patch(patched)
+            if self.layout_path:
+                patched = self._apply_layout_box_scale(patched)
             if patched == xml:
                 print(f"[Patch] no edits applied, skip: {os.path.basename(path)}")
                 return path
@@ -800,6 +1084,105 @@ class Twist2OrcaLabBridge:
 
         self.env.gym.load_model_xml = _patched_load_model_xml
         print("[Fix Feet] Patched gym.load_model_xml — welds will be injected on next model load")
+
+    def _apply_layout_box_scale(self, xml_text):
+        """Rescale box geoms to match the layout's GUI uniformScale edits.
+
+        OrcaLab's gRPC XML export bakes actor positions but NOT uniformScale:
+        boxes scaled down in the GUI keep their original (oversized) size in
+        the bridge physics model. Reads the layout JSON, and for every actor
+        with uniformScale != 1 multiplies the size (half-extents) and pos
+        (center offset) of that actor's geoms.
+        """
+        import json
+        try:
+            with open(self.layout_path, "r") as f:
+                layout = json.load(f)
+        except (OSError, ValueError) as e:
+            print(f"[Bridge] WARNING: cannot read layout {self.layout_path}: {e}")
+            return xml_text
+
+        scale_map = {}
+        for actor in layout.get("actors", []):
+            s = None
+            for ov in actor.get("entity_overrides", []):
+                for grp in ov.get("group_overrids", []):
+                    for prop in grp.get("property_overrides", []):
+                        if prop.get("name") == "uniformScale":
+                            try:
+                                s = float(prop["value"])
+                            except (KeyError, TypeError, ValueError):
+                                pass
+            name = actor.get("name")
+            if name and s is not None and abs(s - 1.0) > 1e-6:
+                # Matching tokens: the layout actor name usually IS the XML
+                # body/geom prefix, but some exports rename the body to
+                # '[GUID]_PrefabName_a' while the layout uses a display name.
+                # Fall back to the asset_path tail segments (e.g. 'pot_02_a'),
+                # which survive into the exported body name (case-insensitive).
+                tokens = [name]
+                ap = actor.get("asset_path") or ""
+                for seg in ap.rstrip("/").split("/")[-2:]:
+                    if len(seg) >= 4 and seg.lower() not in (
+                            t.lower() for t in tokens):
+                        tokens.append(seg)
+                scale_map[name] = (s, tokens)
+        if not scale_map:
+            print(f"[Bridge] Layout {os.path.basename(self.layout_path)}: "
+                  f"no uniformScale overrides → box scale patch skipped")
+            return xml_text
+
+        # Resolve each actor's geom-name prefix in the XML:
+        # 1) direct: geoms named '{actor}__geom...' (most exports)
+        # 2) token: find a <body> whose name contains a token (case-insensitive),
+        #    then use its '[GUID]' bracket prefix (e.g. '[2741906742798]_geom_...')
+        body_names = re.findall(r'<body\b[^>]*\bname="([^"]*)"', xml_text)
+        n_applied = 0
+        for actor, (s, tokens) in scale_map.items():
+            prefixes = [f"{actor}__geom"]
+            for tok in tokens[1:]:
+                for bn in body_names:
+                    if tok.lower() in bn.lower():
+                        gm = re.match(r'\[[0-9a-fA-F-]+\]', bn)
+                        if gm:
+                            prefixes.append(f"{gm.group(0)}_geom")
+                        else:
+                            prefixes.append(f"{bn}_geom")
+            matched = []
+            for pfx in prefixes:
+                pat = re.compile(
+                    rf'(<geom\b[^>]*?\bname="{re.escape(pfx)}[^"]*"[^>]*?/?>)')
+                tag_count = 0
+
+                def _scale_tag(m, _s=s):
+                    nonlocal n_applied, tag_count
+                    tag = m.group(1)
+
+                    def _mul(ma):
+                        attr = ma.group(0).split("=", 1)[0]
+                        vals = [float(v) * _s for v in ma.group(1).split()]
+                        return f'{attr}="{" ".join(f"{v:.9f}" for v in vals)}"'
+
+                    tag = re.sub(r'\bsize="([^"]*)"', _mul, tag)
+                    tag = re.sub(r'\bpos="([^"]*)"', _mul, tag)
+                    n_applied += 1
+                    tag_count += 1
+                    return tag
+
+                new_text = pat.sub(_scale_tag, xml_text)
+                if tag_count:
+                    matched.append((pfx, tag_count))
+                    xml_text = new_text
+            if matched:
+                for pfx, cnt in matched:
+                    print(f"[Bridge] Layout scale x{s:.4f} applied to "
+                          f"{cnt} geom(s) of actor '{actor}' (prefix '{pfx[:36]}')")
+            else:
+                print(f"[Bridge] WARNING: actor '{actor}' (scale x{s:.4f}) "
+                      f"has no matching geoms in the scene XML")
+        if n_applied:
+            print(f"[Bridge] Layout box-scale patch: {n_applied} geom(s) rescaled")
+        return xml_text
 
     def _detect_agent_name(self):
         """Auto-detect the robot agent prefix from model joint names."""
@@ -843,25 +1226,41 @@ class Twist2OrcaLabBridge:
         self.env.set_default_joint_values(init_joint_values)
         self.env.mj_forward()
         self.env.update_data()
-        print("[Bridge] Robot set to TWIST2 standing pose (shoulder_roll=0.4)")
+        print(f"[Bridge] Robot set to '{PARAM_SET_NAME}' standing pose "
+              f"(knee={DEFAULT_DOF_POS[3]:.3f}, elbow={DEFAULT_DOF_POS[18]:.3f})")
 
     def _resolve_actuators(self):
+        def act_id_for(joint_name):
+            """Find the actuator driving joint_name. Most scenes name the
+            actuator exactly like the joint; g1_29dof_old strips the '_joint'
+            suffix, so fall back to that."""
+            full_name = self.env.actuator(joint_name)
+            try:
+                return self.env.model.actuator_name2id(full_name)
+            except KeyError:
+                if joint_name.endswith("_joint"):
+                    alt = self.env.actuator(joint_name[:-len("_joint")])
+                    try:
+                        return self.env.model.actuator_name2id(alt)
+                    except KeyError:
+                        pass
+                raise
+
         self.body_act_ids = []
         for name in TWIST2_JOINT_NAMES:
-            full_name = self.env.actuator(name)
-            act_id = self.env.model.actuator_name2id(full_name)
-            self.body_act_ids.append(act_id)
+            self.body_act_ids.append(act_id_for(name))
         print(f"[Bridge] Resolved {len(self.body_act_ids)} body actuator IDs")
 
     def _override_pd_gains(self):
         """Override the 29 body position-actuator PD gains.
 
-        Policy mode uses the TWIST2 training gains (arm kp=40/kv=5, wrist
-        kp=4.0/kv=0.2): the OrcaLab XML gains (arm kp≈14, wrist kp≈14-17)
-        otherwise cause limit-cycle arm oscillation. Replay-target (B1 twin)
-        mode defaults to the real robot's downlink gains (g1.yaml) so the twin
-        plant matches the real plant; --replay_gains train forces training
-        gains. The 14 hand actuators are untouched (no policy drives them).
+        Policy mode uses the *active param set's* training gains (mjlab:
+        hip kp≈40/ankle kp≈28.5/arm kp≈14.25; twist2: arm kp=40/wrist kp=4.0):
+        the OrcaLab XML gains otherwise do not match the policy's training
+        plant. Replay-target (B1 twin) mode defaults to the real robot's
+        downlink gains (g1.yaml) so the twin plant matches the real plant;
+        --replay_gains train forces training gains. The 14 hand actuators are
+        untouched (no policy drives them).
         """
         if not self.pd_override:
             return
@@ -870,33 +1269,65 @@ class Twist2OrcaLabBridge:
             gain_label = "real g1.yaml downlink values"
         else:
             kp_src, kv_src = TWIST2_STIFFNESS, TWIST2_DAMPING
-            gain_label = "TWIST2 training values"
+            gain_label = f"'{PARAM_SET_NAME}' param set training values"
         m = self.env.gym._mjModel
+        import mujoco
+        n_servo_converted = 0
         for i, act_id in enumerate(self.body_act_ids):
             kp = float(kp_src[i])
             kv = float(kv_src[i])
             if i < 12:
                 kp *= self.leg_pd_gain
                 kv *= self.leg_pd_gain
+            # Torque <motor> actuators (e.g. g1_29dof_old) have biastype=NONE,
+            # which makes MuJoCo IGNORE biasprm entirely — ctrl (a position
+            # target) would then be applied as raw torque (force = kp*ctrl,
+            # no feedback) → violent uncontrolled motion. Convert them into
+            # position servos: force = kp*(ctrl - qpos) - kv*qvel, identical
+            # to MuJoCo's own <position> actuator definition. Position
+            # actuators from other scenes are already affine → untouched.
+            if m.actuator_biastype[act_id] == int(mujoco.mjtBias.mjBIAS_NONE):
+                m.actuator_biastype[act_id] = int(mujoco.mjtBias.mjBIAS_AFFINE)
+                m.actuator_biasprm[act_id, 0] = 0.0
+                n_servo_converted += 1
             m.actuator_gainprm[act_id, 0] = kp
             m.actuator_biasprm[act_id, 1] = -kp
             m.actuator_biasprm[act_id, 2] = -kv
+        conversion_note = (f"; converted {n_servo_converted} torque motors "
+                           f"→ position servos" if n_servo_converted else "")
         print(f"[Bridge] Overrode {len(self.body_act_ids)} body actuator PD gains "
-              f"to {gain_label}; leg gain x{self.leg_pd_gain:.2f}")
+              f"to {gain_label}; leg gain x{self.leg_pd_gain:.2f}{conversion_note}")
 
     def _resolve_hand_actuators(self):
         self.hand_act_ids = []
         self._hand_joint_full_names = [self.env.joint(n) for n in HAND_JOINT_NAMES]
         for name in HAND_JOINT_NAMES:
             full_name = self.env.actuator(name)
-            act_id = self.env.model.actuator_name2id(full_name)
+            try:
+                act_id = self.env.model.actuator_name2id(full_name)
+            except KeyError:
+                # Handless robot: actuator doesn't exist at all (name2id raises,
+                # it does not return -1)
+                act_id = -1
             self.hand_act_ids.append(act_id)
-        print(f"[Bridge] Resolved {len(self.hand_act_ids)} hand actuator IDs")
+        # Handless robot (e.g. g1_29dof_old without Dex3 hands): name2id returns
+        # -1 for every hand actuator. Degrade gracefully — an empty hand_act_ids
+        # makes all hand ctrl-write loops no-ops instead of corrupting ctrl[-1].
+        if any(a < 0 for a in self.hand_act_ids):
+            self.has_hands = False
+            self.hand_act_ids = []
+            print("[Bridge] No hand actuators found in scene model "
+                  "(handless robot?) → hand teleop DISABLED (body-only mode)")
+        else:
+            self.has_hands = True
+            print(f"[Bridge] Resolved {len(self.hand_act_ids)} hand actuator IDs")
 
     def _validate_hand_poses(self):
         """Warn loudly if the OrcaLab hand open/close poses fall outside the
         model's actual joint ranges (guards against conf/XML drift, e.g. the
         thumb_2 sign error that once silently inverted the grip direction)."""
+        if not self.has_hands:
+            return
         import mujoco
         m = self.env.gym._mjModel
         tol = 1e-3
@@ -917,9 +1348,13 @@ class Twist2OrcaLabBridge:
         self.body_qpos_offsets = np.array(body_qpos_off, dtype=int)
         self.body_qvel_offsets = np.array(body_qvel_off, dtype=int)
 
-        hand_joint_names = [self.env.joint(n) for n in HAND_JOINT_NAMES]
-        hand_qpos_off, _, _ = self.env.query_joint_offsets(hand_joint_names)
-        self.hand_qpos_offsets = np.array(hand_qpos_off, dtype=int)
+        if self.has_hands:
+            hand_joint_names = [self.env.joint(n) for n in HAND_JOINT_NAMES]
+            hand_qpos_off, _, _ = self.env.query_joint_offsets(hand_joint_names)
+            self.hand_qpos_offsets = np.array(hand_qpos_off, dtype=int)
+            print(f"[Bridge] Hand joint qpos range: [{self.hand_qpos_offsets[0]}, {self.hand_qpos_offsets[-1]}]")
+        else:
+            self.hand_qpos_offsets = np.zeros(0, dtype=int)
 
         free_joint_name = self.env.joint("floating_base_joint")
         free_qpos_off, free_qvel_off, _ = self.env.query_joint_offsets([free_joint_name])
@@ -927,7 +1362,6 @@ class Twist2OrcaLabBridge:
         self.free_qvel_adr = int(free_qvel_off[0])
         print(f"[Bridge] Freejoint qpos_adr={self.free_qpos_adr}, qvel_adr={self.free_qvel_adr}")
         print(f"[Bridge] Body joint qpos range: [{self.body_qpos_offsets[0]}, {self.body_qpos_offsets[-1]}]")
-        print(f"[Bridge] Hand joint qpos range: [{self.hand_qpos_offsets[0]}, {self.hand_qpos_offsets[-1]}]")
 
     @staticmethod
     def _dummy_obs_callback(_env):
@@ -1035,6 +1469,25 @@ class Twist2OrcaLabBridge:
             print(f"[Bridge] REPLAY load failed: {e}")
             return False
 
+    def _poll_web_cmd(self):
+        """Consume one command from the web control page (Redis key bridge_cmd).
+
+        The PICO browser holds the input focus, so controller A/B never reach
+        the XRoboToolkit stream; the web page posts commands here instead.
+        Presence of the key = a fresh click (single fire, we delete after read).
+        """
+        try:
+            cmd = self.redis_client.get("bridge_cmd")
+            if cmd is None:
+                return None
+            self.redis_client.delete("bridge_cmd")
+            if isinstance(cmd, bytes):
+                cmd = cmd.decode()
+            return {"start": "start_pause", "pause": "start_pause", "start_pause": "start_pause",
+                    "refresh": "refresh", "record": "record", "replay": "replay"}.get(cmd.strip().lower())
+        except Exception:
+            return None
+
     def run(self):
         print("[Bridge] Starting main control loop...")
         print(f"[Bridge] Press '{self.start_button}' to cycle IDLE → TELEOP → PAUSE → TELEOP ...")
@@ -1107,6 +1560,18 @@ class Twist2OrcaLabBridge:
                             replay_pressed = self._read_button_path(ctrl_data, self.replay_button)
                         except Exception:
                             pass
+
+                    # ── Web control page buttons (browser is foreground → joystick
+                    #    buttons are swallowed by PICO browser; these come from Redis) ──
+                    web_cmd = self._poll_web_cmd()
+                    if web_cmd == "start_pause":
+                        pressed = True
+                    elif web_cmd == "refresh":
+                        reset_pressed = True
+                    elif web_cmd == "record":
+                        record_pressed = True
+                    elif web_cmd == "replay":
+                        replay_pressed = True
 
                 if pressed and not button_was_pressed:
                     if state == "idle":
@@ -1498,11 +1963,13 @@ class Twist2OrcaLabBridge:
         hand_dof = np.array([self.env.data.qpos[off] for off in self.hand_qpos_offsets], dtype=np.float32)
         hand_target = self._remap_hand_pose(self._selftest_hand(t))
         hand_idx = [0, 1, 2, 5, 7, 8, 9, 12]  # L/R thumb_0..2 + index_0
+        hand_dof_str = (np.round(hand_dof[hand_idx], 3).tolist()
+                        if self.has_hands else "n/a (handless)")
         print(f"[Selftest] t={t:.2f}s state={state} "
               f"arm_dof={np.round(dof_pos[15:29], 3).tolist()} "
               f"legs_dof={np.round(dof_pos[0:15], 3).tolist()} "
               f"root_xyz={np.round(root_xyz, 3).tolist()} "
-              f"hand_dof={np.round(hand_dof[hand_idx], 3).tolist()} "
+              f"hand_dof={hand_dof_str} "
               f"hand_target={np.round(hand_target[0:8], 3).tolist()}")
 
     def _read_button_path(self, controller_data, path):
@@ -1584,6 +2051,11 @@ def main():
                         help="Device for policy inference (cuda/cpu)")
     parser.add_argument("--fix_feet", action="store_true",
                         help="Weld pelvis+feet to world and zero leg+torso actions (arm-only)")
+    parser.add_argument("--params", choices=sorted(PARAM_SETS.keys()), default="mjlab",
+                        help="Parameter set: default pose / per-joint action scale / PD gains / "
+                             "policy Hz, must match the policy's training repo. "
+                             "'mjlab' = this repo's 1524-dim policies (default); "
+                             "'twist2' = original TWIST2 constants (legacy behavior)")
 
     grp = parser.add_argument_group("Local XML mode")
     grp.add_argument("--local_xml", default=None,
@@ -1604,8 +2076,11 @@ def main():
                       help="Disable rendering (always applied in local mode unless OrcaStudio is reachable)")
     grp3.add_argument("--no_pd_override", action="store_true",
                       help="Keep OrcaLab XML actuator PD gains (default: override "
-                           "29 body actuators to TWIST2 training gains to kill "
-                           "arm oscillation)")
+                           "29 body actuators to the selected param set's training "
+                           "gains to match the training plant)")
+    grp3.add_argument("--policy_hz", type=float, default=None,
+                      help="Override policy/control frequency in Hz "
+                           "(default: param set's policy_hz: mjlab=50, twist2=100)")
     grp3.add_argument("--leg_pd_gain", type=float, default=1.0,
                       help="Scale leg (12 joints) kp/kv by this factor "
                            "(OrcaLab soft-contact compensation; sweep 1.0~2.0)")
@@ -1651,6 +2126,14 @@ def main():
     grp6.add_argument("--verbose", action="store_true",
                       help="Print arm-link diagnostics every 500 policy calls "
                            "(mimic arm values/rate, pd_target range, inferred teleop state)")
+    grp6.add_argument("--dump_model", action="store_true",
+                      help="Print the full joint/actuator/equality layout of the "
+                           "loaded model (after patches) and exit. Use to map "
+                           "MuJoCo QACC warning DOF indices to named joints.")
+    grp6.add_argument("--layout", default=None,
+                      help="OrcaLab layout JSON (e.g. fbteleop.json): rescale box "
+                           "geom collision sizes to match the GUI uniformScale "
+                           "edits, which the gRPC XML export does not bake in")
     grp6.add_argument("--selftest", action="store_true",
                       help="Headless self-test: synthetic sine-arm mimic + synthetic button presses, "
                            "no Redis reads, auto-exit after 5s")
@@ -1671,6 +2154,10 @@ def main():
 
     args = parser.parse_args()
 
+    # 按参数组重绑全局常量（必须在构造 bridge 之前）
+    apply_param_set(args.params)
+    policy_hz = args.policy_hz if args.policy_hz is not None else POLICY_HZ
+
     if args.replay_target:
         if args.policy:
             print("[Bridge] NOTE: --policy is ignored in --replay_target mode.")
@@ -1688,6 +2175,19 @@ def main():
             print(f"Error: XML file not found: {args.local_xml}")
             sys.exit(1)
 
+    # Default layout: auto-apply fbteleop.json when present next to the script,
+    # so GUI uniformScale edits always reach the bridge physics (the gRPC XML
+    # export does not bake them in). --layout="" explicitly disables.
+    if args.layout is None:
+        default_layout = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "fbteleop.json")
+        if os.path.exists(default_layout):
+            args.layout = default_layout
+            print(f"[Bridge] No --layout given, auto-applying default: "
+                  f"{default_layout}")
+    elif args.layout == "":
+        args.layout = None
+
     bridge = Twist2OrcaLabBridge(
         policy_path=args.policy,
         device=args.device,
@@ -1695,6 +2195,7 @@ def main():
          pd_override=not args.no_pd_override,
          leg_pd_gain=args.leg_pd_gain,
          leg_ema_alpha=args.leg_ema_alpha,
+         policy_hz=policy_hz,
          frame_skip=args.frame_skip,
          time_step=args.time_step,
          redis_host=args.redis_host,
@@ -1718,7 +2219,12 @@ def main():
          replay_gains=args.replay_gains,
          target_key=args.target_key,
          target_ts_key=args.target_ts_key,
+         layout_path=args.layout,
      )
+    if args.dump_model:
+        bridge._dump_model()
+        sys.exit(0)
+
     bridge.run()
 
 

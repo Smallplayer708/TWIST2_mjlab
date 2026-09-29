@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TWIST2 XR 串流屏</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:sans-serif}
+  #video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+  #ui{position:absolute;top:12px;left:50%;transform:translateX(-50%);display:flex;gap:10px;z-index:2}
+  #ui button{font-size:20px;padding:10px 22px;border:0;border-radius:10px;color:#fff;
+             background:#1565c0;cursor:pointer}
+  #ui button:disabled{background:#555}
+  #status{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);
+          color:#8f8;font-size:14px;text-shadow:0 0 4px #000;z-index:2}
+</style>
+</head>
+<body>
+<video id="video" autoplay playsinline muted></video>
+<div id="ui">
+  <button id="enterBtn">🥽 进入 VR（画面跟随视角）</button>
+</div>
+<div id="status">未连接</div>
+<script src="/three.min.js"></script>
+<script>
+const qs = new URLSearchParams(location.search);
+const SRC  = qs.get("src")  || "orcalab";
+const DIST = parseFloat(qs.get("dist") || "1.8");   // 屏幕距离（米）
+const W    = parseFloat(qs.get("w")    || "2.4");   // 屏幕宽（米）
+const video = document.getElementById("video");
+const statusEl = document.getElementById("status");
+const setStatus = t => statusEl.textContent = t;
+
+/* ---------- WHEP 拉流（同源 /whep 代理 → go2rtc） ---------- */
+let pc = null;
+function whepConnect() {
+  pc = new RTCPeerConnection();
+  pc.addTransceiver("video", {direction: "recvonly"});
+  pc.ontrack = e => {
+    video.srcObject = e.streams[0];
+    setStatus("拉流中: " + SRC);
+    document.getElementById("enterBtn").disabled = false;
+  };
+  pc.oniceconnectionstatechange = () => {
+    setStatus("ICE: " + pc.iceConnectionState);
+    if (["failed", "disconnected", "closed"].includes(pc.iceConnectionState)) {
+      setTimeout(() => { try { pc.close(); } catch (_) {} whepConnect(); }, 2000);
+    }
+  };
+  pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() =>
+    fetch("/whep?src=" + encodeURIComponent(SRC), {
+      method: "POST",
+      headers: {"Content-Type": "application/sdp"},
+      body: pc.localDescription.sdp
+    })
+  ).then(r => {
+    if (!r.ok) throw new Error("WHEP HTTP " + r.status);
+    return r.text();
+  }).then(answer => pc.setRemoteDescription({type: "answer", sdp: answer}))
+    .catch(e => { setStatus("拉流失败: " + e.message); setTimeout(whepConnect, 3000); });
+}
+whepConnect();
+
+/* ---------- 发送桥接命令（与控制页同一 Redis 通道） ---------- */
+const CMD_LABELS = {start_pause: "启动/暂停", refresh: "刷新场景",
+                    record: "录制", replay: "回放"};
+function sendCmd(name) {
+  drawStatus("已发送: " + (CMD_LABELS[name] || name), "#7fff7f");
+  fetch("/cmd?name=" + name, {method: "POST"})
+    .then(r => { if (!r.ok) throw new Error(r.status); })
+    .catch(() => drawStatus("发送失败（PC 端 1986 服务器未连接）", "#ff7f7f"));
+}
+
+/* ---------- three.js 场景 ---------- */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 50);
+const renderer = new THREE.WebGLRenderer({antialias: true, alpha: false});
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+renderer.domElement.style.position = "absolute";
+renderer.domElement.style.inset = "0";
+renderer.domElement.style.display = "none";   // 非 VR 时隐藏，直接显示 video
+
+const hud = new THREE.Group();
+scene.add(hud);
+let videoTex = null, screenMesh = null, statusMesh = null, statusCanvas = null;
+function buildHud() {
+  videoTex = new THREE.VideoTexture(video);
+  videoTex.colorSpace = THREE.SRGBColorSpace;
+  const h = W * 9 / 16;
+  screenMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(W, h),
+    new THREE.MeshBasicMaterial({map: videoTex}));
+  screenMesh.position.y = 0.15;
+  hud.add(screenMesh);
+
+  // 3D 按钮（控制器射线点选），与控制页同样的 4 个命令
+  const names  = ["start_pause", "refresh", "record", "replay"];
+  const labels = ["启动/暂停", "刷新场景", "录制", "回放"];
+  const colors = [0x2e7d32, 0x1565c0, 0xc62828, 0x6a1b9a];
+  const bw = 0.5, bh = 0.16, gap = 0.1;
+  const total = names.length * bw + (names.length - 1) * gap;
+  names.forEach((name, i) => {
+    const cv = document.createElement("canvas");
+    cv.width = 256; cv.height = 96;
+    const c = cv.getContext("2d");
+    c.fillStyle = "#" + colors[i].toString(16).padStart(6, "0");
+    c.fillRect(0, 0, cv.width, cv.height);
+    c.fillStyle = "#fff";
+    c.font = "bold 44px sans-serif";
+    c.textAlign = "center"; c.textBaseline = "middle";
+    c.fillText(labels[i], 128, 50);
+    const btn = new THREE.Mesh(
+      new THREE.PlaneGeometry(bw, bh),
+      new THREE.MeshBasicMaterial({map: new THREE.CanvasTexture(cv)}));
+    btn.position.set(-total / 2 + bw / 2 + i * (bw + gap),
+                     -h / 2 - 0.24, 0);
+    btn.userData.cmd = name;
+    hud.add(btn);
+  });
+
+  // 状态条：显示最近一次发送的命令（VR 内唯一可见反馈）
+  statusCanvas = document.createElement("canvas");
+  statusCanvas.width = 1024; statusCanvas.height = 96;
+  drawStatus("点按钮发送命令（射线对准后扣扳机）");
+  statusMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(W * 0.7, W * 0.7 * 96 / 1024),
+    new THREE.MeshBasicMaterial({map: new THREE.CanvasTexture(statusCanvas),
+                                 transparent: true}));
+  statusMesh.position.set(0, -h / 2 - 0.46, 0.01);
+  hud.add(statusMesh);
+}
+function drawStatus(text, color) {
+  const c = statusCanvas.getContext("2d");
+  c.clearRect(0, 0, statusCanvas.width, statusCanvas.height);
+  c.fillStyle = color || "#7fff7f";
+  c.font = "bold 52px sans-serif";
+  c.textAlign = "center"; c.textBaseline = "middle";
+  c.fillText(text, 512, 50);
+  if (statusMesh) statusMesh.material.map.needsUpdate = true;
+}
+video.addEventListener("loadeddata", () => { if (!screenMesh) buildHud(); });
+
+/* 头动锁屏：每帧把整个 HUD 贴到视线正前方 */
+renderer.setAnimationLoop(() => {
+  if (renderer.xr.isPresenting) {
+    const cam = renderer.xr.getCamera();
+    const p = new THREE.Vector3(), q = new THREE.Quaternion();
+    cam.matrixWorld.decompose(p, q, new THREE.Vector3());
+    hud.quaternion.copy(q);
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+    hud.position.copy(p).addScaledVector(fwd, DIST);
+  } else {
+    // 桌面预览：HUD 正对原点相机（不渲染，仅占位）
+  }
+  // 命中闪光的按钮缩回原尺寸
+  hud.children.forEach(o => {
+    if (o.userData.cmd && o.scale.x > 1.001)
+      o.scale.lerp(new THREE.Vector3(1, 1, 1), 0.18);
+  });
+  renderer.render(scene, camera);
+});
+
+/* ---------- 控制器射线点选 3D 按钮 ---------- */
+const raycaster = new THREE.Raycaster();
+const controllers = [renderer.xr.getController(0), renderer.xr.getController(1)];
+controllers.forEach(ctrl => {
+  const line = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(
+      [new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -3)]),
+    new THREE.LineBasicMaterial({color: 0x00ff88}));
+  ctrl.add(line);
+  scene.add(ctrl);
+  ctrl.addEventListener("selectstart", () => {
+    const m = new THREE.Matrix4().identity().extractRotation(ctrl.matrixWorld);
+    raycaster.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
+    raycaster.ray.direction.set(0, 0, -1).applyMatrix4(m);
+    const hit = raycaster.intersectObjects(hud.children, false)
+                       .find(h => h.object.userData.cmd);
+    if (hit) {
+      hit.object.scale.set(1.25, 1.25, 1);   // 命中闪光，动画循环里缩回
+      sendCmd(hit.object.userData.cmd);
+    }
+  });
+});
+
+/* ---------- 进入 VR ---------- */
+document.getElementById("enterBtn").onclick = async () => {
+  if (!navigator.xr) { setStatus("此浏览器不支持 WebXR（需 PICO 浏览器 + HTTPS）"); return; }
+  try {
+    const session = await navigator.xr.requestSession("immersive-vr",
+        {optionalFeatures: ["local-floor", "bounded-floor"]});
+    renderer.xr.setReferenceSpaceType("local");
+    await renderer.xr.setSession(session);
+    // 注意：display:none 的 video 在 Chromium 上可能停止解码导致纹理冻结，
+    // 移到屏幕外保持解码流水线运行
+    video.style.cssText =
+      "position:absolute;left:-9999px;top:0;width:320px;height:180px";
+    renderer.domElement.style.display = "block";
+    setStatus("VR 模式：屏幕跟随视角 | 控制器射线点下方按钮");
+  } catch (e) {
+    setStatus("进入 VR 失败: " + e.message);
+  }
+};
+setStatus("连接中: " + SRC);
+</script>
+</body>
+</html>

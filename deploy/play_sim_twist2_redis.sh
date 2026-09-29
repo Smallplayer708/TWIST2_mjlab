@@ -15,6 +15,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "${SCRIPT_DIR}")"
 
+# uv venv lives outside the project (sandbox cannot write <root>/.venv)
+export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-/home/user/.local/share/twist2_mjlab/venv}"
+
 ONNX_MODEL="${1:-}"
 if [[ -z "${ONNX_MODEL}" ]]; then
   echo "Usage: $0 /path/to/model.onnx [--redis-ip IP] [--redis-port PORT]"

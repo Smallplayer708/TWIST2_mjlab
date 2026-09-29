@@ -1,0 +1,251 @@
+{
+    "version": "4.0",
+    "level": {
+        "name": "orcalab_day",
+        "path": "orcalab_day",
+        "package_reference": {
+            "name": "OrcaLab Engine",
+            "tech_name": "__engine__",
+            "author": "",
+            "project_name": ""
+        }
+    },
+    "viewport_camera_transform": {
+        "position": [
+            -2.205698251724243,
+            -1.7399696111679077,
+            1.5098367929458618
+        ],
+        "rotation": [
+            0.7581781095009646,
+            -0.28821033034468324,
+            -0.20782962293692853,
+            0.5467244347804896
+        ]
+    },
+    "actors": [
+        {
+            "name": "ef86a7f14543cf3a7459283ccda72e94_usda_1",
+            "path": "/ef86a7f14543cf3a7459283ccda72e94_usda_1",
+            "type": "AssetActor",
+            "transform": {
+                "position": [
+                    -2.541041135787964,
+                    -0.6177690625190735,
+                    -0.0026584547013044357
+                ],
+                "rotation": [
+                    0.9993342761720004,
+                    -0.03648293392511083,
+                    0.0,
+                    0.0
+                ],
+                "scale": 0.5972644090652466
+            },
+            "asset_path": "assets/3e2def7b0d023a52/default_project/prefabs/ef86a7f14543cf3a7459283ccda72e94_usda",
+            "entity_overrides": [
+                {
+                    "entity_path": [],
+                    "group_overrids": [
+                        {
+                            "type_id": "{22B10178-39B6-4C12-BB37-77DB45FDD3B6}",
+                            "type_index": 0,
+                            "property_overrides": [
+                                {
+                                    "name": "translate.x",
+                                    "value": -2.541041135787964,
+                                    "type": "float"
+                                },
+                                {
+                                    "name": "translate.y",
+                                    "value": -0.6177690625190735,
+                                    "type": "float"
+                                },
+                                {
+                                    "name": "translate.z",
+                                    "value": -0.0026584547013044357,
+                                    "type": "float"
+                                },
+                                {
+                                    "name": "rotate.x",
+                                    "value": -4.1815643310546875,
+                                    "type": "float"
+                                },
+                                {
+                                    "name": "uniformScale",
+                                    "value": 0.5972644090652466,
+                                    "type": "float"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "name": "white_latching_plastic_storage_box_1",
+            "path": "/white_latching_plastic_storage_box_1",
+            "type": "AssetActor",
+            "transform": {
+                "position": [
+                    -1.627882480621338,
+                    -1.5710231065750122,
+                    0.0
+                ],
+                "rotation": [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": 0.883308470249176
+            },
+            "asset_path": "assets/3e2def7b0d023a52/default_project/prefabs/a_75bf354ef299d6176f2da83ae7245406_usda",
+            "entity_overrides": [
+                {
+                    "entity_path": [],
+                    "group_overrids": [
+                        {
+                            "type_id": "{22B10178-39B6-4C12-BB37-77DB45FDD3B6}",
+                            "type_index": 0,
+                            "property_overrides": [
+                                {
+                                    "name": "translate.x",
+                                    "value": -1.627882480621338,
+                                    "type": "float"
+                                },
+                                {
+                                    "name": "translate.y",
+                                    "value": -1.5710231065750122,
+                                    "type": "float"
+                                },
+                                {
+                                    "name": "uniformScale",
+                                    "value": 0.883308470249176,
+                                    "type": "float"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "name": "unitree_humanoid_robot_1",
+            "path": "/unitree_humanoid_robot_1",
+            "type": "AssetActor",
+            "transform": {
+                "position": [
+                    -3.283655881881714,
+                    -0.5867230892181396,
+                    0.0
+                ],
+                "rotation": [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": 1.0
+            },
+            "asset_path": "assets/13951baeb514b4b9/robot_adapt/prefabs/g1_29dof_old_usda",
+            "entity_overrides": [
+                {
+                    "entity_path": [],
+                    "group_overrids": [
+                        {
+                            "type_id": "{22B10178-39B6-4C12-BB37-77DB45FDD3B6}",
+                            "type_index": 0,
+                            "property_overrides": [
+                                {
+                                    "name": "translate.x",
+                                    "value": -3.283655881881714,
+                                    "type": "float"
+                                },
+                                {
+                                    "name": "translate.y",
+                                    "value": -0.5867230892181396,
+                                    "type": "float"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "name": "yellow_metal_double_handle_pot_1",
+            "path": "/yellow_metal_double_handle_pot_1",
+            "type": "AssetActor",
+            "transform": {
+                "position": [
+                    -2.556093692779541,
+                    -0.5905395150184631,
+                    0.4389188587665558
+                ],
+                "rotation": [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": 0.5699085593223572
+            },
+            "asset_path": "assets/cb9b36b102080fdd/default_project/kitchen_night/prop/prefabs/pot_02_a",
+            "entity_overrides": [
+                {
+                    "entity_path": [],
+                    "group_overrids": [
+                        {
+                            "type_id": "{22B10178-39B6-4C12-BB37-77DB45FDD3B6}",
+                            "type_index": 0,
+                            "property_overrides": [
+                                {
+                                    "name": "translate.y",
+                                    "value": -0.5905395150184631,
+                                    "type": "float"
+                                },
+                                {
+                                    "name": "translate.z",
+                                    "value": 0.4389188587665558,
+                                    "type": "float"
+                                },
+                                {
+                                    "name": "uniformScale",
+                                    "value": 0.5699085593223572,
+                                    "type": "float"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "package_references": [
+        {
+            "name": "快递纸盒_37*27*27cm",
+            "tech_name": "scale_box_03",
+            "author": "yurujia",
+            "project_name": "default_project"
+        },
+        {
+            "name": "浅灰色带窗硬质塑料箱_64*45*35 cm",
+            "tech_name": "scale_box_02",
+            "author": "yurujia",
+            "project_name": "default_project"
+        },
+        {
+            "name": "Unitree_G1_人形机器人",
+            "tech_name": "robot_humanoid_unitree_g1",
+            "author": "admin_test_1",
+            "project_name": "robot_adapt"
+        },
+        {
+            "name": "Kitchen_Night_2",
+            "tech_name": "kitchen_night_2",
+            "author": "admin_test",
+            "project_name": "default_project"
+        }
+    ]
+}
