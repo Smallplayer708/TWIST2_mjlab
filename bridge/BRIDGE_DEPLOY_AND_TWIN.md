@@ -227,14 +227,15 @@ python bridge_twist2_to_orcalab.py --replay_target \
 | 键 | teleop | bridge |
 |---|---|---|
 | 右手 A（`RightController.key_one`） | 切四态 | — |
-| 右手 B（`RightController.key_two`） | — | 启动 bridge 四态 |
+| 右手 B（`RightController.key_two`） | — | 录制 toggle（Remote Vision 模式下同时会切双屏） |
 | 左手 A（`LeftController.key_one`） | 退出 teleop | — |
 | 左手 B（`LeftController.key_two`） | — | 刷新场景 |
-| 右手摇杆按下（`RightController.axis_click`） | — | 录制 toggle |
-| **左手摇杆按下（`LeftController.axis_click`）** | **急停（`pkill -f sim2real.sh`）** | 回放 toggle |
+| 右手摇杆按下（`RightController.axis_click`） | — | 回放 toggle |
+| **左手摇杆按下（`LeftController.axis_click`）** | **急停（`pkill -f sim2real.sh`）** | **启动 bridge 四态** |
 
-> ⚠️ 左手摇杆按下在 teleop 里是急停。**真机在跑时不要按**，否则会杀掉 sim2real。
-> 孪生模式不需要录制/回放，但别误按。
+> ⚠️ 左手摇杆按下在 teleop 里是急停。**真机在跑时不要按**，否则会杀掉 sim2real（OrcaLab 仿真下无影响）。
+> 启动键改到左手摇杆的原因：Remote Vision 模式下右手 B 被 APK 固定为切双屏。
+> 回放会直接进入 TELEOP 驱动旧录制帧——回放完先按左 B 刷新场景再回到实时遥操作。
 
 ### 4.6 Redis 键
 

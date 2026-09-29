@@ -781,10 +781,11 @@ class Twist2OrcaLabBridge:
         redis_port=6379,
         enable_render=True,
         agent_name=None,
-        # Default to RightController.key_two (B): key_one (A) is teleop's own
+        # Default to left stick press: right B is hijacked by XRoboToolkit
+        # Remote Vision (dual-screen toggle), and key_one (A) is teleop's own
         # state-cycle button — sharing it desyncs the two state machines
         # (bridge misses a rising edge → stuck one state behind teleop).
-        start_button="RightController.key_two",
+        start_button="LeftController.axis_click",
         reset_button="LeftController.key_two",
         auto_teleop=False,
         patch_xml_inplace=False,
@@ -792,9 +793,9 @@ class Twist2OrcaLabBridge:
         stale_ms=200,
         verbose=False,
         selftest=False,
-        # Record/replay
-        record_button="RightController.axis_click",
-        replay_button="LeftController.axis_click",
+        # Record/replay (rare use; right B also toggles Remote Vision dual-screen)
+        record_button="RightController.key_two",
+        replay_button="RightController.axis_click",
         record_file="logs/bridge_record.json",
         # Local mode args
         local_xml=None,
@@ -2093,22 +2094,25 @@ def main():
     grp4.add_argument("--redis_port", type=int, default=6379)
 
     grp5 = parser.add_argument_group("Teleop gating")
-    grp5.add_argument("--start_button", default="RightController.key_two",
+    grp5.add_argument("--start_button", default="LeftController.axis_click",
                       help="Joystick button (dotted path in controller_data) to cycle "
-                           "IDLE→TELEOP→PAUSE→TELEOP (default: RightController.key_two; "
-                           "key_one is teleop's own state button and must not be shared)")
+                           "IDLE→TELEOP→PAUSE→TELEOP (default: left stick press; "
+                           "right B is hijacked by XRoboToolkit Remote Vision to "
+                           "toggle dual-screen, and key_one is teleop's own state "
+                           "button — neither may be shared)")
     grp5.add_argument("--reset_button", default="LeftController.key_two",
                       help="Joystick button (dotted path in controller_data) to refresh the "
                            "scene layout: reset simulation + robot back to standing pose + "
-                           "return to IDLE (default: LeftController.key_two)")
-    grp5.add_argument("--record_button", default="RightController.axis_click",
+                           "return to IDLE (default: left B)")
+    grp5.add_argument("--record_button", default="RightController.key_two",
                       help="Joystick button to toggle RECORD of the teleop input "
-                           "stream (default: right stick press, unused by teleop)")
-    grp5.add_argument("--replay_button", default="LeftController.axis_click",
+                           "stream (default: right B; remote-use only — pressing it "
+                           "also toggles Remote Vision dual-screen)")
+    grp5.add_argument("--replay_button", default="RightController.axis_click",
                       help="Joystick button to toggle REPLAY of the recorded "
-                           "stream (default: left stick press). NOTE: teleop also "
-                           "uses left stick press as its emergency stop (pkill "
-                           "sim2real.sh) — harmless when only bridge runs.")
+                           "stream (default: right stick press). NOTE: replay jumps "
+                           "straight into TELEOP driving stale recorded frames — "
+                           "reset the scene (left B) before going back to live teleop")
     grp5.add_argument("--record_file", default="logs/bridge_record.json",
                       help="JSON path for the recorded session (save on record "
                            "stop, load on replay)")

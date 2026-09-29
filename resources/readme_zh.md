@@ -1038,7 +1038,7 @@ TWIST2_MOTION_FILE=/path/to/enriched/dataset.yaml bash train_twist2.sh 0 \
 # 1) teleop（先启动，bridge 依赖其 Redis 数据流）
 bash teleop.sh
 
-# 2) OrcaLab 测试版（无仿真启动，之后用 B 键激活 bridge 仿真）
+# 2) OrcaLab 测试版（无仿真启动，之后用左摇杆按下激活 bridge 仿真）
 QT_QPA_PLATFORM=xcb /home/user/miniconda3/envs/orcalab-test/bin/orcalab
 
 # 3) bridge（--layout 现在有默认值，不传也会自动加载 bridge/fbteleop.json）
@@ -1119,7 +1119,7 @@ python bridge/orcalab_vision_sender.py --window orca --fps 15
 
 ### 已知限制
 
-- **右 B 键冲突**：Remote Vision 模式下右手 B 被固定为切双屏（APK 内置行为），bridge 默认的启动键（右 B）会被占用 → 启动 bridge 时加 `--start_button RightController.axis_click` 换成右摇杆按下；录制/刷新等其余键位可用 `--record_button` / `--reset_button` / `--replay_button` 调整
+- **按键分配**（Remote Vision 模式下右手 B 被 APK 固定为切双屏，故启动键默认放在左摇杆）：**左摇杆按下 = 启动/暂停**，左 B = 刷新场景，右 B = 录制，右摇杆按下 = 回放；可用 `--start_button` / `--reset_button` / `--record_button` / `--replay_button` 覆盖。注意回放会直接进入 TELEOP 驱动旧录制帧（机器人会摔倒），回放完按左 B 刷新场景
 - 串流的是 2D 窗口光栅，画面内容不跟随头动（OrcaLab 渲染相机不变）
 - Remote Vision 会话期间 XRoboToolkit 保持前台，与浏览器/WebXR 互斥
 
